@@ -779,7 +779,7 @@ impl App {
                             }
                         }
                     });
-                    ui.label(RichText::new(format).size(11.0).color(DIM));
+                    ui.label(RichText::new(format).size(11.0).color(mood.map_or(DIM, |_| Color32::from_white_alpha(150))));
                 });
             });
         });
@@ -834,7 +834,7 @@ impl App {
                 ui.add_space(64.0);
                 let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
                 let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-                scroll.show(ui, |ui| {
+                ui.vertical(|ui| scroll.show(ui, |ui| {
                     ui.add_space(height * 0.2);
                     let line = |text: &str, color| RichText::new(text).font(bold(34.0)).color(color);
                     match lyrics {
@@ -866,7 +866,7 @@ impl App {
                         }
                     }
                     ui.add_space(height / 2.0);
-                });
+                }));
             });
         });
     }
