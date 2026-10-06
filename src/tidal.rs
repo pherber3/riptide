@@ -90,6 +90,13 @@ pub struct Playlist {
     pub count: u64,
 }
 
+/// Lyrics: timed lines when Tidal has them synced, else just the text.
+#[derive(Clone, Debug)]
+pub struct Lyrics {
+    pub synced: Vec<(f64, String)>,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Results {
     pub artists: Vec<Artist>,
@@ -229,6 +236,28 @@ impl Tidal {
         Ok((playlist(&info).context("bad playlist")?, items.iter().filter_map(track).collect()))
     }
 
+    /// Tracks like this one, for radio.
+    pub async fn track_radio(&mut self, id: u64) -> Result<Vec<Track>> {
+        Ok(list(&self.get(&format!("tracks/{id}/radio"), &[("limit", "100")]).await?["items"], track))
+    }
+
+    pub async fn artist_radio(&mut self, id: u64) -> Result<Vec<Track>> {
+        Ok(list(&self.get(&format!("artists/{id}/radio"), &[("limit", "100")]).await?["items"], track))
+    }
+
+    /// None when the track has no lyrics.
+    pub async fn lyrics(&mut self, id: u64) -> Result<Option<Lyrics>> {
+        let v = match self.get(&format!("tracks/{id}/lyrics"), &[]).await {
+            Ok(v) => v,
+            Err(e) if e.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status) == Some(reqwest::StatusCode::NOT_FOUND) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let synced = v["subtitles"].as_str().map_or_else(Vec::new, lrc);
+        Ok(Some(Lyrics { synced, text: text(&v["lyrics"]) }))
+    }
+
     fn user(&self) -> Result<u64> {
         let info = self.client.user_info.as_ref().map(|u| u.user_id);
         info.or(self.client.session.auth.user_id).context("not signed in")
@@ -273,6 +302,16 @@ impl Tidal {
         }
         Ok(())
     }
+}
+
+/// `[mm:ss.xx] words` lines.
+fn lrc(subtitles: &str) -> Vec<(f64, String)> {
+    let line = |l: &str| {
+        let (stamp, words) = l.trim().strip_prefix('[')?.split_once(']')?;
+        let (minutes, seconds) = stamp.split_once(':')?;
+        Some((minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?, words.trim().to_string()))
+    };
+    subtitles.lines().filter_map(line).collect()
 }
 
 fn list<T>(v: &Value, parse: fn(&Value) -> Option<T>) -> Vec<T> {
