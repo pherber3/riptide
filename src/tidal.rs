@@ -75,9 +75,10 @@ impl Tidal {
         let codec = info.get_codecs().unwrap_or_default();
         let parts = match info.manifest_parsed {
             Some(ParsedTrackManifest::Json(m)) => Parts::Urls(m.urls),
+            // tidlers leaves XML escapes in the DASH attributes.
             Some(ParsedTrackManifest::Dash(m)) => Parts::Segments {
-                init: m.get_init_url().context("DASH manifest has no init segment")?.clone(),
-                template: m.get_media_template().context("DASH manifest has no media template")?.clone(),
+                init: m.get_init_url().context("DASH manifest has no init segment")?.replace("&amp;", "&"),
+                template: m.get_media_template().context("DASH manifest has no media template")?.replace("&amp;", "&"),
                 start: m.start_number.unwrap_or(1),
             },
             None => bail!("Tidal returned no stream manifest"),

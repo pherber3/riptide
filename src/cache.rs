@@ -18,6 +18,7 @@ pub struct Writer {
     file: File,
     shared: Shared,
     marker: PathBuf,
+    held: Option<u64>,
 }
 
 /// Reads a file that may still be downloading, blocking until bytes arrive.
@@ -36,7 +37,7 @@ pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
     let file = File::create(path)?;
     let shared = Shared::default();
     let reader = Reader { file: File::open(path)?, pos: 0, shared: shared.clone() };
-    Ok((Writer { file, shared, marker: marker(path) }, reader))
+    Ok((Writer { file, shared, marker: marker(path), held: None }, reader))
 }
 
 pub fn open_complete(path: &Path) -> Option<Reader> {
@@ -52,10 +53,19 @@ pub fn open_complete(path: &Path) -> Option<Reader> {
 impl Writer {
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)?;
+        if let Some(held) = &mut self.held {
+            *held += bytes.len() as u64;
+            return Ok(());
+        }
         let (lock, cv) = &*self.shared;
         lock.lock().unwrap().written += bytes.len() as u64;
         cv.notify_all();
         Ok(())
+    }
+
+    /// Keeps readers waiting until the download is complete, for formats that need the whole file.
+    pub fn hold(&mut self) {
+        self.held = Some(0);
     }
 
     pub fn finish(self, result: Result<(), String>) {
@@ -64,6 +74,7 @@ impl Writer {
         });
         let (lock, cv) = &*self.shared;
         let mut p = lock.lock().unwrap();
+        p.written += self.held.unwrap_or(0);
         p.done = true;
         p.failed = result.err();
         cv.notify_all();
@@ -139,18 +150,58 @@ async fn fetch_into(http: &reqwest::Client, parts: &Parts, w: &mut Writer) -> an
             }
         }
         Parts::Segments { init, template, start } => {
-            copy(http.get(init).send().await?.error_for_status()?, w).await?;
+            let init = http.get(init).send().await?.error_for_status()?.bytes().await?;
+            // Hi-res FLAC arrives as fragmented MP4. Rewrap it as a native FLAC stream so it
+            // decodes progressively; symphonia's MP4 reader wants the whole file first, so
+            // anything else (AAC on tracks without FLAC) is played once fully downloaded.
+            let dfla = find_box(&init, b"dfLa");
+            match dfla {
+                Some(dfla) => w.append(&[b"fLaC", &dfla[4..]].concat())?,
+                None => {
+                    w.hold();
+                    w.append(&init)?;
+                }
+            }
             for n in *start.. {
                 let resp = http.get(template.replace("$Number$", &n.to_string())).send().await?;
                 // tidlers doesn't parse the segment timeline, so the first 4xx after segment one is the end.
                 if resp.status().is_client_error() && n > *start {
                     break;
                 }
-                copy(resp.error_for_status()?, w).await?;
+                let segment = resp.error_for_status()?.bytes().await?;
+                if dfla.is_none() {
+                    w.append(&segment)?;
+                    continue;
+                }
+                for (kind, body) in boxes(&segment) {
+                    if kind == b"mdat" {
+                        w.append(body)?;
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Top-level MP4 boxes as (type, payload).
+fn boxes(mut data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    std::iter::from_fn(move || {
+        let size = u32::from_be_bytes(data.get(..4)?.try_into().ok()?) as usize;
+        if size < 8 || size > data.len() {
+            return None;
+        }
+        let (kind, body) = (&data[4..8], &data[8..size]);
+        data = &data[size..];
+        Some((kind, body))
+    })
+}
+
+/// Payload of the first box of this type anywhere in `data`.
+fn find_box<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    let at = data.windows(4).position(|w| w == kind)?.checked_sub(4)?;
+    let size = u32::from_be_bytes(data[at..at + 4].try_into().ok()?) as usize;
+    data.get(at + 8..at + size)
 }
 
 async fn copy(mut resp: reqwest::Response, w: &mut Writer) -> anyhow::Result<()> {

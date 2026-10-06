@@ -41,7 +41,7 @@ impl Decoder {
             channels: p.channels.map_or(2, |c| c.count()),
             bits: p.bits_per_sample,
             codec: symphonia::default::get_codecs().get_codec(p.codec).map_or("?", |c| c.short_name),
-            duration: p.n_frames.zip(p.time_base).map(|(n, tb)| {
+            duration: p.n_frames.filter(|&n| n > 0).zip(p.time_base).map(|(n, tb)| {
                 let t = tb.calc_time(n);
                 Duration::from_secs_f64(t.seconds as f64 + t.frac)
             }),
@@ -115,7 +115,7 @@ impl Resampler {
 
     pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<()> {
         if let Some(r) = &mut self.inner {
-            let chunk: Vec<Vec<f32>> = self.pending.iter_mut().map(|p| p.drain(..).collect()).collect();
+            let chunk: Vec<Vec<f32>> = self.pending.iter_mut().map(std::mem::take).collect();
             interleave(&r.process_partial(Some(&chunk), None)?, out);
         }
         Ok(())
