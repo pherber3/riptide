@@ -103,15 +103,15 @@ pub struct Playlist {
     pub count: u64,
 }
 
-/// Lyrics: timed lines when Tidal has them synced, else just the text.
-#[derive(Clone, Debug)]
+/// Lyrics: timed lines when Tidal has them synced, else just the text; both empty when there are none.
+#[derive(Clone, Debug, Default)]
 pub struct Lyrics {
     pub synced: Vec<(f64, String)>,
     pub text: String,
 }
 
 /// A Tidal mix (a personal radio station); its artwork is a full URL.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Mix {
     pub id: String,
     pub title: String,
@@ -119,19 +119,14 @@ pub struct Mix {
     pub image: Option<String>,
 }
 
+/// Anything shown as a card: in a grid, on a shelf, or in a playlist folder.
 #[derive(Clone, Debug)]
 pub enum Card {
     Album(Album),
     Artist(Artist),
     Playlist(Playlist),
     Mix(Mix),
-}
-
-/// What a playlist folder holds.
-#[derive(Clone, Debug)]
-pub enum Entry {
     Folder { id: String, name: String, count: u64 },
-    Playlist(Playlist),
 }
 
 /// One row of the home page.
@@ -140,14 +135,6 @@ pub struct Shelf {
     pub title: String,
     pub cards: Vec<Card>,
     pub tracks: Vec<Track>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Results {
-    pub artists: Vec<Artist>,
-    pub albums: Vec<Album>,
-    pub tracks: Vec<Track>,
-    pub playlists: Vec<Playlist>,
 }
 
 /// An image URL from a Tidal image id. Albums come in 80/160/320/640/1280, artists in 160/320/480/750.
@@ -323,15 +310,19 @@ impl Tidal {
         dash(&manifest).context("unreadable stream manifest")
     }
 
-    pub async fn search(&self, query: &str) -> Result<Results> {
+    /// Search results as shelves: tracks, then artists, albums and playlists.
+    pub async fn search(&self, query: &str) -> Result<Vec<Shelf>> {
         let types = "ARTISTS,ALBUMS,TRACKS,PLAYLISTS";
         let v = self.get(&format!("{V1}/search"), &[("query", query), ("types", types), ("limit", "20")]).await?;
-        Ok(Results {
-            artists: list(&v["artists"]["items"], artist),
-            albums: list(&v["albums"]["items"], album),
-            tracks: list(&v["tracks"]["items"], track),
-            playlists: list(&v["playlists"]["items"], playlist),
-        })
+        let shelf = |title: &str, cards: Vec<Card>, tracks| Shelf { title: title.into(), cards, tracks };
+        let cards = |key: &str, parse: fn(&Value) -> Option<Card>| list(&v[key]["items"], parse);
+        let shelves = [
+            shelf("Tracks", Vec::new(), list(&v["tracks"]["items"], track)),
+            shelf("Artists", cards("artists", |v| artist(v).map(Card::Artist)), Vec::new()),
+            shelf("Albums", cards("albums", |v| album(v).map(Card::Album)), Vec::new()),
+            shelf("Playlists", cards("playlists", |v| playlist(v).map(Card::Playlist)), Vec::new()),
+        ];
+        Ok(shelves.into_iter().filter(|s| !s.cards.is_empty() || !s.tracks.is_empty()).collect())
     }
 
     pub async fn album(&self, id: u64) -> Result<(Album, Vec<Track>)> {
@@ -389,17 +380,15 @@ impl Tidal {
         Ok(list(&self.get(&format!("{V1}/{kind}/{id}/radio"), &[("limit", "100")]).await?["items"], track))
     }
 
-    /// None when the track has no lyrics.
-    pub async fn lyrics(&self, id: u64) -> Result<Option<Lyrics>> {
+    pub async fn lyrics(&self, id: u64) -> Result<Lyrics> {
         let v = match self.get(&format!("{V1}/tracks/{id}/lyrics"), &[]).await {
             Ok(v) => v,
             Err(e) if e.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status) == Some(reqwest::StatusCode::NOT_FOUND) => {
-                return Ok(None);
+                return Ok(Lyrics::default());
             }
             Err(e) => return Err(e),
         };
-        let synced = v["subtitles"].as_str().map_or_else(Vec::new, lrc);
-        Ok(Some(Lyrics { synced, text: text(&v["lyrics"]) }))
+        Ok(Lyrics { synced: v["subtitles"].as_str().map_or_else(Vec::new, lrc), text: text(&v["lyrics"]) })
     }
 
     async fn user(&self) -> Result<String> {
@@ -425,15 +414,15 @@ impl Tidal {
     }
 
     /// A playlist folder's folders and playlists, newest first; "root" is the top level.
-    pub async fn folder(&self, id: &str) -> Result<Vec<Entry>> {
+    pub async fn folder(&self, id: &str) -> Result<Vec<Card>> {
         let query = [("folderId", id), ("includeOnly", ""), ("order", "DATE"), ("orderDirection", "DESC")];
         let entry = |item: &Value| match item["itemType"].as_str()? {
-            "FOLDER" => Some(Entry::Folder {
+            "FOLDER" => Some(Card::Folder {
                 id: text(&item["data"]["id"]),
                 name: text(&item["name"]),
                 count: item["data"]["totalNumberOfItems"].as_u64().unwrap_or(0),
             }),
-            "PLAYLIST" => playlist(&item["data"]).map(Entry::Playlist),
+            "PLAYLIST" => playlist(&item["data"]).map(Card::Playlist),
             _ => None,
         };
         self.items(&format!("{V2}/my-collection/playlists/folders"), &query, 1000, entry).await

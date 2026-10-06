@@ -4,83 +4,197 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Result;
-use egui::{Align, Color32, Key, Layout, Rect, RichText, Sense, Ui, vec2};
+use egui::{Align, Color32, Key, Layout, RichText, Sense, Ui};
 use fastframe_now_playing as np;
 
 use crate::art::Art;
 use crate::cache;
 use crate::decode::Decoder;
 use crate::player::{Cmd, Event, Player};
-use crate::tidal::{self, Album, Artist, Card, Entry, Lyrics, Mix, Playlist, Quality, Results, Shelf, Tidal, Track};
+use crate::queue::{self, Queue, Repeat};
+use crate::tidal::{self, Card, Lyrics, Mix, Quality, Shelf, Tidal, Track};
+use crate::view::{Sort, View};
+use crate::widgets::{ACCENT, Rows, art, clickable, clock, heart, link_text, picture, section, tier_color};
 
-const ACCENT: Color32 = Color32::from_rgb(0x33, 0xff, 0xee);
-const GOLD: Color32 = Color32::from_rgb(0xf5, 0xc5, 0x42);
-const ROW: f32 = 22.0;
+const HISTORY: usize = 30;
+const ROOT: &str = "root";
+const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
+const NAME_SORTS: &[Sort] = &[Sort::Added, Sort::Title];
 
-enum Page {
-    Home(Vec<Shelf>),
-    Mix(Mix, Vec<Track>),
-    Search(Results),
-    Album(Album, Vec<Track>),
-    Artist(Artist, Vec<Track>, Vec<Album>),
-    Playlist(Playlist, Vec<Track>),
-    Tracks(Vec<Track>),
-    Albums(Vec<Album>),
-    Artists(Vec<Artist>),
-    /// A playlist folder (id, title; "root" is the top level) and what it holds.
-    Playlists(String, String, Vec<Entry>),
-    Queue,
-    Lyrics,
-    Loading,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Library {
-    Tracks,
-    Albums,
-    Artists,
-    Playlists,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Repeat {
-    Off,
-    All,
-    One,
-}
-
-enum Msg {
-    Page(Page),
-    Ready(u64, Box<Decoder>),
-    SignedIn(Tidal),
-    Favorites(HashSet<u64>),
-    Folders(Vec<Entry>),
-    Done,
-    Error(String),
-    Radio(Vec<Track>),
-    /// Radio to keep playing after the queue's last track (whose id comes first).
-    Continue(u64, Vec<Track>),
-    Lyrics(u64, Option<Lyrics>),
-    Player(Event),
-}
-
-enum Action {
-    Search,
+/// Tidal content the app can open as a page or play.
+#[derive(Clone, PartialEq)]
+pub enum Source {
     Home,
-    Mix(Mix),
-    Folder(String, String),
-    SearchPage,
+    Search(String),
     Album(u64),
     Artist(u64),
     Playlist(String),
-    Library(Library),
+    Mix(Mix),
+    /// A playlist folder: id ("root" is the top level) and name.
+    Folder(String, String),
+    Tracks,
+    Albums,
+    Artists,
+    TrackRadio(u64),
+    ArtistRadio(u64),
+}
+
+impl Source {
+    pub fn open(card: &Card) -> Self {
+        match card {
+            Card::Album(a) => Self::Album(a.id),
+            Card::Artist(a) => Self::Artist(a.id),
+            Card::Playlist(p) => Self::Playlist(p.id.clone()),
+            Card::Mix(m) => Self::Mix(m.clone()),
+            Card::Folder { id, name, .. } => Self::Folder(id.clone(), name.clone()),
+        }
+    }
+
+    /// What a card's play button plays: its tracks, or an artist's radio.
+    pub fn play(card: &Card) -> Option<Self> {
+        match card {
+            Card::Folder { .. } => None,
+            Card::Artist(a) => Some(Self::ArtistRadio(a.id)),
+            _ => Some(Self::open(card)),
+        }
+    }
+
+    /// The remembered sort of a page that can be filtered and sorted.
+    fn sort_key(&self) -> Option<&'static str> {
+        match self {
+            Self::Tracks => Some("tracks"),
+            Self::Albums => Some("albums"),
+            Self::Artists => Some("artists"),
+            Self::Folder(..) => Some("playlists"),
+            Self::Playlist(_) => Some("playlist"),
+            _ => None,
+        }
+    }
+
+    fn playlists() -> Self {
+        Self::Folder(ROOT.into(), "Playlists".into())
+    }
+}
+
+/// A page's title, artwork (with whether it is round) and radio.
+pub struct Head {
+    pub title: String,
+    pub subtitle: String,
+    pub art: Option<(Option<String>, bool)>,
+    pub radio: Option<Source>,
+}
+
+impl Head {
+    fn title(title: impl Into<String>) -> Option<Self> {
+        Some(Self { title: title.into(), subtitle: String::new(), art: None, radio: None })
+    }
+}
+
+pub enum Body {
+    Tracks { tracks: Vec<Track>, album_column: bool },
+    Grid { cards: Vec<Card>, sorts: &'static [Sort] },
+    Shelves(Vec<Shelf>),
+}
+
+impl Body {
+    /// What the page's Play and Shuffle buttons play.
+    pub fn tracks(&self) -> &[Track] {
+        match self {
+            Self::Tracks { tracks, .. } => tracks,
+            Self::Shelves(shelves) => shelves.iter().find(|s| !s.tracks.is_empty()).map_or(&[], |s| &s.tracks),
+            Self::Grid { .. } => &[],
+        }
+    }
+}
+
+pub struct Page {
+    pub source: Source,
+    pub head: Option<Head>,
+    pub body: Body,
+    /// Filter and sort, on pages that have them.
+    pub view: Option<View>,
+}
+
+/// Loads any page. Playing a source loads its page too and plays the page's tracks.
+async fn load(tidal: Tidal, source: Source) -> Result<Page> {
+    let tracks = |tracks, album_column| Body::Tracks { tracks, album_column };
+    let (head, body) = match &source {
+        Source::Home => match tidal.home().await {
+            Ok(shelves) if !shelves.is_empty() => (None, Body::Shelves(shelves)),
+            _ => return Box::pin(load(tidal, Source::playlists())).await,
+        },
+        Source::Search(query) => (Head::title(format!("Results for “{query}”")), Body::Shelves(tidal.search(query).await?)),
+        Source::Album(id) => {
+            let (album, list) = tidal.album(*id).await?;
+            let subtitle = [album.artist.as_str(), &album.year].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+            let art = Some((art(album.cover.as_deref(), 640), false));
+            (Some(Head { title: album.title, subtitle, art, radio: None }), tracks(list, false))
+        }
+        Source::Artist(id) => {
+            let (artist, top, albums) = tidal.artist(*id).await?;
+            let art = Some((art(artist.picture.as_deref(), 480), true));
+            let head = Head { title: artist.name, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
+            let top = Shelf { title: "Top tracks".into(), cards: Vec::new(), tracks: top };
+            let albums = Shelf { title: "Albums".into(), cards: albums.into_iter().map(Card::Album).collect(), tracks: Vec::new() };
+            (Some(head), Body::Shelves(vec![top, albums]))
+        }
+        Source::Playlist(id) => {
+            let (playlist, list) = tidal.playlist(id).await?;
+            let art = Some((art(playlist.cover.as_deref(), 640), false));
+            (Some(Head { title: playlist.title, subtitle: format!("{} tracks", playlist.count), art, radio: None }), tracks(list, true))
+        }
+        Source::Mix(mix) => {
+            let head = Head { title: mix.title.clone(), subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), radio: None };
+            (Some(head), tracks(tidal.mix_tracks(&mix.id).await?, true))
+        }
+        Source::Tracks => (Head::title("Tracks"), tracks(tidal.favorite_tracks().await?, true)),
+        Source::Albums => {
+            let cards = tidal.favorite_albums().await?.into_iter().map(Card::Album).collect();
+            (Head::title("Albums"), Body::Grid { cards, sorts: ALBUM_SORTS })
+        }
+        Source::Artists => {
+            let cards = tidal.favorite_artists().await?.into_iter().map(Card::Artist).collect();
+            (Head::title("Artists"), Body::Grid { cards, sorts: NAME_SORTS })
+        }
+        Source::Folder(id, name) => (Head::title(name.clone()), Body::Grid { cards: tidal.folder(id).await?, sorts: NAME_SORTS }),
+        Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.radio("tracks", *id).await?, true)),
+        Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.radio("artists", *id).await?, true)),
+    };
+    Ok(Page { source, head, body, view: None })
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Side {
     Queue,
-    Play(Vec<Track>, usize),
-    PlayNext(Track),
-    AddToQueue(Track),
+    Lyrics,
+}
+
+enum Msg {
+    SignedIn(Tidal),
+    Page(Box<Page>),
+    /// Tracks to play now.
+    Tracks(Vec<Track>),
+    /// Radio to keep playing after the queue's last track (whose id comes first).
+    Continue(u64, Vec<Track>),
+    Ready(u64, Box<Decoder>),
+    Favorites(HashSet<u64>),
+    Folders(Vec<Card>),
+    Lyrics(u64, Lyrics),
+    Error(String),
+    Player(Event),
+    Done,
+}
+
+pub enum Action {
+    Open(Source),
+    Play(Source),
+    PlayTracks(Vec<Track>, usize),
+    ShuffleTracks(Vec<Track>),
+    /// Queue a track next (true) or last.
+    Enqueue(Track, bool),
     Jump(usize),
     Move(usize, usize),
     Remove(usize),
@@ -90,18 +204,13 @@ enum Action {
     Prev,
     Seek(f64),
     Shuffle,
-    ShufflePlay(Vec<Track>),
-    TrackRadio(u64),
-    PlayAlbum(u64),
-    PlayPlaylist(String),
-    PlayMix(String),
-    ArtistRadio(u64),
-    Lyrics,
     Repeat,
     Sort(Sort),
-    Back,
-    Forward,
+    /// Back (true) or forward through history.
+    Step(bool),
     Quality(Quality),
+    Side(Side),
+    FocusSearch,
 }
 
 /// A sign-in in progress and what the user pasted.
@@ -123,47 +232,31 @@ pub struct App {
     error: Option<String>,
     player: Player,
     controls: np::NowPlaying,
-    shown: np::State,
-    page: Page,
+    /// The track and playback state last given to the media controls.
+    shown: (Option<u64>, np::Playback),
+    page: Option<Page>,
     back: Vec<Page>,
     forward: Vec<Page>,
-    view: View,
+    loading: bool,
     /// The sort each kind of list page was last left in.
-    sorts: HashMap<&'static str, (Sort, bool)>,
+    sorts: HashMap<String, (Sort, bool)>,
     query: String,
-    queue: Vec<Track>,
-    index: Option<usize>,
-    /// The queue's order before shuffling, while shuffle is on.
-    unshuffled: Option<Vec<Track>>,
-    repeat: Repeat,
+    queue: Queue,
     favorites: HashSet<u64>,
     /// Top-level playlist folders and playlists, for the sidebar.
-    folders: Vec<Entry>,
+    folders: Vec<Card>,
+    side: Option<Side>,
     quality: Quality,
     volume: f32,
     dragging: Option<f64>,
     /// Where to resume after reloading the current track in another quality.
     resume_at: Option<f64>,
-    /// Lyrics for a track id: None while loading, Some(None) when it has none.
-    lyrics: Option<(u64, Option<Option<Lyrics>>)>,
+    /// Lyrics for a track id; None while they load.
+    lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
 }
 
 impl App {
-    fn save_settings(&self) {
-        let mut text = format!("quality={}\nvolume={}\n", self.quality.name(), self.volume);
-        for (page, (sort, reversed)) in &self.sorts {
-            text += &format!("sort.{page}={sort:?}{}\n", if *reversed { " reversed" } else { "" });
-        }
-        let _ = std::fs::write(settings_path(&self.session), text);
-    }
-
-    /// A fresh filter for the current page, in the sort that kind of page was last left in.
-    fn reset_view(&mut self) {
-        let (sort, reverse) = page_key(&self.page).and_then(|k| self.sorts.get(k)).copied().unwrap_or_default();
-        self.view = View { sort, reverse, ..View::default() };
-    }
-
     pub fn new(cc: &eframe::CreationContext<'_>, dir: &Path) -> Result<Self> {
         let ctx = cc.egui_ctx.clone();
         ctx.set_visuals(egui::Visuals::dark());
@@ -202,19 +295,17 @@ impl App {
             error: None,
             player,
             controls,
-            shown: np::State::default(),
-            page: Page::Loading,
+            shown: (None, np::Playback::Stopped),
+            page: None,
             back: Vec::new(),
             forward: Vec::new(),
-            view: View::default(),
+            loading: true,
             sorts,
             query: String::new(),
-            queue: Vec::new(),
-            index: None,
-            unshuffled: None,
-            repeat: Repeat::Off,
+            queue: Queue::default(),
             favorites: HashSet::new(),
             folders: Vec::new(),
+            side: None,
             quality,
             volume,
             dragging: None,
@@ -237,45 +328,44 @@ impl App {
         });
     }
 
-    fn show(&mut self, page: Page) {
-        let old = std::mem::replace(&mut self.page, page);
-        self.reset_view();
-        if !matches!(old, Page::Loading) {
+    fn save_settings(&self) {
+        let mut text = format!("quality={}\nvolume={}\n", self.quality.name(), self.volume);
+        for (page, (sort, reversed)) in &self.sorts {
+            text += &format!("sort.{page}={sort:?}{}\n", if *reversed { " reversed" } else { "" });
+        }
+        let _ = std::fs::write(settings_path(&self.session), text);
+    }
+
+    /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
+    fn show(&mut self, mut page: Page) {
+        page.view = page.source.sort_key().map(|key| View::new(key, self.sorts.get(key).copied().unwrap_or_default()));
+        if let Some(old) = self.page.replace(page) {
             self.back.push(old);
+            if self.back.len() > HISTORY {
+                self.back.remove(0);
+            }
         }
         self.forward.clear();
+        self.loading = false;
         self.ctx.forget_all_images();
     }
 
-    /// Steps through history like a browser: `back` pops from `from` and pushes the current page onto `to`.
+    /// Steps through history like a browser.
     fn step(&mut self, back: bool) {
         let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
         if let Some(page) = from.pop() {
-            let old = std::mem::replace(&mut self.page, page);
-            if !matches!(old, Page::Loading) {
-                to.push(old);
-            }
-            self.reset_view();
+            to.extend(self.page.replace(page));
             self.ctx.forget_all_images();
         }
     }
 
-    fn navigate(&mut self, load: impl Future<Output = Result<Page>> + Send + 'static) {
-        self.show(Page::Loading);
-        self.spawn(async move { Ok(Msg::Page(load.await?)) });
-    }
-
-    fn current(&self) -> Option<&Track> {
-        self.queue.get(self.index?)
-    }
-
     fn play(&mut self, index: usize) {
         let Some(tidal) = self.tidal.clone() else { return };
-        self.index = Some(index);
+        self.queue.index = Some(index);
         self.error = None;
         let (dir, quality) = (self.cache.clone(), self.quality);
-        let id = self.queue[index].id;
-        let next = self.queue.get(index + 1).map(|t| t.id);
+        let id = self.queue.tracks[index].id;
+        let next = self.queue.tracks.get(index + 1).map(|t| t.id);
         self.spawn(async move {
             let reader = cache::track(&tidal, &dir, id, quality).await?;
             // Download the next track once this one is in, so it starts instantly without slowing this one.
@@ -292,156 +382,53 @@ impl App {
         });
     }
 
+    fn stop(&mut self) {
+        self.queue.index = None;
+        self.player.send(Cmd::Stop);
+    }
+
+    /// The next track, or radio from the last one when the queue runs out (autoplay).
     fn next(&mut self) {
-        match self.index {
-            Some(i) if i + 1 < self.queue.len() => self.play(i + 1),
-            Some(_) if self.repeat == Repeat::All => self.play(0),
-            Some(i) if let Some(tidal) = self.tidal.clone() => {
-                let id = self.queue[i].id;
-                self.spawn(async move { Ok(Msg::Continue(id, tidal.radio("tracks", id).await?)) });
-            }
-            _ => {
-                self.index = None;
-                self.player.send(Cmd::Stop);
-            }
+        match (self.queue.after(), self.queue.current().map(|t| t.id), self.tidal.clone()) {
+            (Some(i), ..) => self.play(i),
+            (None, Some(id), Some(tidal)) => self.spawn(async move { Ok(Msg::Continue(id, tidal.radio("tracks", id).await?)) }),
+            _ => self.stop(),
         }
     }
 
     fn prev(&mut self) {
-        match self.index {
+        match self.queue.index {
             Some(i) if i > 0 && self.player.status.position() < 3.0 => self.play(i - 1),
             Some(_) => self.player.send(Cmd::Seek(0.0)),
             None => {}
         }
     }
 
-    /// Adds to the queue at `at` (also keeping the unshuffled order in step), or starts playing when idle.
-    fn enqueue(&mut self, track: Track, at: usize) {
-        if self.index.is_none() {
-            (self.queue, self.unshuffled) = (vec![track], None);
-            return self.play(0);
-        }
-        if let Some(order) = &mut self.unshuffled {
-            order.push(track.clone());
-        }
-        self.queue.insert(at.min(self.queue.len()), track);
-    }
-
-    fn set_shuffle(&mut self, on: bool) {
-        let current = self.current().map(|t| t.id);
-        if on {
-            self.unshuffled = Some(self.queue.clone());
-            let from = self.index.map_or(0, |i| i + 1);
-            shuffle(&mut self.queue[from..]);
-        } else if let Some(order) = self.unshuffled.take() {
-            self.queue = order;
-            self.index = current.and_then(|id| self.queue.iter().position(|t| t.id == id));
-        }
-    }
-
     fn apply(&mut self, action: Action) {
         let Some(tidal) = self.tidal.clone() else { return };
         match action {
-            Action::Search => {
-                let query = self.query.trim().to_string();
-                if !query.is_empty() {
-                    self.navigate(async move { Ok(Page::Search(tidal.search(&query).await?)) });
+            Action::Open(source) => {
+                (self.loading, self.error) = (true, None);
+                self.spawn(async move { Ok(Msg::Page(Box::new(load(tidal, source).await?))) });
+            }
+            Action::Play(source) => self.spawn(async move { Ok(Msg::Tracks(load(tidal, source).await?.body.tracks().to_vec())) }),
+            Action::PlayTracks(tracks, index) => {
+                let start = self.queue.replace(tracks, index, false);
+                self.play(start);
+            }
+            Action::ShuffleTracks(tracks) if !tracks.is_empty() => {
+                let start = self.queue.replace(tracks.clone(), queue::random(tracks.len()), true);
+                self.play(start);
+            }
+            Action::ShuffleTracks(_) => {}
+            Action::Enqueue(track, next) => {
+                if !self.queue.enqueue(track, next) {
+                    self.play(0);
                 }
             }
-            Action::Album(id) => self.navigate(async move {
-                let (album, tracks) = tidal.album(id).await?;
-                Ok(Page::Album(album, tracks))
-            }),
-            Action::Artist(id) => self.navigate(async move {
-                let (artist, top, albums) = tidal.artist(id).await?;
-                Ok(Page::Artist(artist, top, albums))
-            }),
-            Action::Playlist(id) => self.navigate(async move {
-                let (playlist, tracks) = tidal.playlist(&id).await?;
-                Ok(Page::Playlist(playlist, tracks))
-            }),
-            Action::Library(kind) => self.navigate(async move {
-                let t = tidal;
-                Ok(match kind {
-                    Library::Tracks => Page::Tracks(t.favorite_tracks().await?),
-                    Library::Albums => Page::Albums(t.favorite_albums().await?),
-                    Library::Artists => Page::Artists(t.favorite_artists().await?),
-                    Library::Playlists => Page::Playlists("root".into(), "Playlists".into(), t.folder("root").await?),
-                })
-            }),
-            Action::Queue => self.show(Page::Queue),
-            Action::Home => self.navigate(home_page(tidal)),
-            Action::Folder(id, name) => self.navigate(async move {
-                let entries = tidal.folder(&id).await?;
-                Ok(Page::Playlists(id, name, entries))
-            }),
-            Action::Mix(mix) => self.navigate(async move {
-                let tracks = tidal.mix_tracks(&mix.id).await?;
-                Ok(Page::Mix(mix, tracks))
-            }),
-            Action::Lyrics if matches!(self.page, Page::Lyrics) => self.apply(Action::Back),
-            Action::Lyrics => self.show(Page::Lyrics),
-            Action::ShufflePlay(mut tracks) => {
-                self.unshuffled = Some(tracks.clone());
-                shuffle(&mut tracks);
-                self.queue = tracks;
-                self.play(0);
-            }
-            Action::TrackRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.radio("tracks", id).await?)) }),
-            Action::PlayAlbum(id) => self.spawn(async move { Ok(Msg::Radio(tidal.album(id).await?.1)) }),
-            Action::PlayPlaylist(id) => self.spawn(async move { Ok(Msg::Radio(tidal.playlist(&id).await?.1)) }),
-            Action::PlayMix(id) => self.spawn(async move { Ok(Msg::Radio(tidal.mix_tracks(&id).await?)) }),
-            Action::ArtistRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.radio("artists", id).await?)) }),
-            // Sorting by the current column again reverses it, as Tidal does.
-            Action::Sort(sort) => {
-                let view = &mut self.view;
-                view.reverse = view.sort == sort && !view.reverse;
-                (view.sort, view.stale) = (sort, true);
-                if let Some(key) = page_key(&self.page) {
-                    self.sorts.insert(key, (sort, self.view.reverse));
-                    self.save_settings();
-                }
-            }
-            // Back to the last search results rather than searching again.
-            Action::SearchPage if !matches!(self.page, Page::Search(_)) => {
-                let at = self.back.iter().rposition(|p| matches!(p, Page::Search(_)));
-                let page = at.map_or(Page::Search(Results::default()), |at| self.back.remove(at));
-                self.show(page);
-            }
-            Action::SearchPage => {}
-            Action::Play(mut tracks, index) => {
-                if self.unshuffled.is_some() {
-                    // Shuffle stays on: the clicked track first, the rest in random order.
-                    self.unshuffled = Some(tracks.clone());
-                    let first = tracks.remove(index);
-                    shuffle(&mut tracks);
-                    tracks.insert(0, first);
-                    self.queue = tracks;
-                    return self.play(0);
-                }
-                self.queue = tracks;
-                self.play(index);
-            }
-            Action::PlayNext(track) => {
-                let at = self.index.map_or(0, |i| i + 1);
-                self.enqueue(track, at);
-            }
-            Action::AddToQueue(track) => self.enqueue(track, usize::MAX),
             Action::Jump(i) => self.play(i),
-            Action::Move(from, to) => {
-                let track = self.queue.remove(from);
-                self.queue.insert(to, track);
-                self.index = self.index.map(|i| match i {
-                    i if i == from => to,
-                    i if from < i && i <= to => i - 1,
-                    i if to <= i && i < from => i + 1,
-                    i => i,
-                });
-            }
-            Action::Remove(i) => {
-                self.queue.remove(i);
-                self.index = self.index.map(|c| if i < c { c - 1 } else { c });
-            }
+            Action::Move(from, to) => self.queue.move_track(from, to),
+            Action::Remove(i) => self.queue.remove(i),
             Action::Favorite(id, on) => {
                 if on { self.favorites.insert(id) } else { self.favorites.remove(&id) };
                 self.spawn(async move {
@@ -453,77 +440,62 @@ impl App {
             Action::Next => self.next(),
             Action::Prev => self.prev(),
             Action::Seek(seconds) => self.player.send(Cmd::Seek(seconds)),
-            Action::Shuffle => self.set_shuffle(self.unshuffled.is_none()),
-            Action::Repeat => {
-                self.repeat = match self.repeat {
-                    Repeat::Off => Repeat::All,
-                    Repeat::All => Repeat::One,
-                    Repeat::One => Repeat::Off,
+            Action::Shuffle => self.queue.set_shuffle(!self.queue.shuffled()),
+            Action::Repeat => self.queue.cycle_repeat(),
+            // Sorting by the current column again reverses it, as Tidal does.
+            Action::Sort(sort) => {
+                if let Some(view) = self.page.as_mut().and_then(|p| p.view.as_mut()) {
+                    view.reverse = view.sort == sort && !view.reverse;
+                    view.sort = sort;
+                    self.sorts.insert(view.key.into(), (sort, view.reverse));
+                    self.save_settings();
                 }
             }
+            Action::Step(back) => self.step(back),
             Action::Quality(quality) => {
                 self.quality = quality;
                 self.save_settings();
-                if let Some(i) = self.index {
+                if let Some(i) = self.queue.index {
                     self.resume_at = Some(self.player.status.position());
                     self.play(i);
                 }
             }
-            Action::Back => self.step(true),
-            Action::Forward => self.step(false),
+            Action::Side(side) => self.side = (self.side != Some(side)).then_some(side),
+            Action::FocusSearch => self.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search"))),
         }
     }
 
     fn receive(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Page(page) => {
-                    self.page = page;
-                    self.reset_view();
+                Msg::SignedIn(tidal) => {
+                    self.tidal = Some(tidal.clone());
+                    (self.busy, self.login) = (false, None);
+                    let (t, u) = (tidal.clone(), tidal.clone());
+                    self.spawn(async move { Ok(Msg::Page(Box::new(load(tidal, Source::Home).await?))) });
+                    self.spawn(async move { Ok(Msg::Favorites(t.favorite_ids().await?)) });
+                    self.spawn(async move { Ok(Msg::Folders(u.folder(ROOT).await?)) });
                 }
-                Msg::Ready(id, decoder) if self.current().is_some_and(|t| t.id == id) => {
+                Msg::Page(page) => self.show(*page),
+                Msg::Tracks(tracks) if !tracks.is_empty() => self.apply(Action::PlayTracks(tracks, 0)),
+                Msg::Tracks(_) => self.error = Some("Nothing to play here.".into()),
+                Msg::Continue(after, tracks) if self.queue.current().is_some_and(|t| t.id == after) => match self.queue.extend_new(tracks) {
+                    Some(i) => self.play(i),
+                    None => self.stop(),
+                },
+                Msg::Ready(id, decoder) if self.queue.current().is_some_and(|t| t.id == id) => {
                     self.player.send(Cmd::Load(decoder));
                     if let Some(seconds) = self.resume_at.take() {
                         self.player.send(Cmd::Seek(seconds));
                     }
                 }
-                Msg::Ready(..) | Msg::Done => {}
-                Msg::Radio(tracks) if !tracks.is_empty() => self.apply(Action::Play(tracks, 0)),
-                Msg::Radio(_) => self.error = Some("Nothing to play here.".into()),
-                Msg::Continue(after, tracks) if self.current().is_some_and(|t| t.id == after) => {
-                    let known: HashSet<u64> = self.queue.iter().map(|t| t.id).collect();
-                    let before = self.queue.len();
-                    self.queue.extend(tracks.into_iter().filter(|t| !known.contains(&t.id)));
-                    if self.queue.len() > before {
-                        self.play(before);
-                    } else {
-                        self.index = None;
-                        self.player.send(Cmd::Stop);
-                    }
-                }
-                Msg::Continue(..) => {}
-                Msg::Lyrics(id, lyrics) => {
-                    self.lyrics = Some((id, Some(lyrics)));
-                    self.lyric_line = None;
-                }
-                Msg::SignedIn(tidal) => {
-                    self.tidal = Some(tidal.clone());
-                    (self.busy, self.login) = (false, None);
-                    let (t, u) = (tidal.clone(), tidal.clone());
-                    self.spawn(async move { Ok(Msg::Page(home_page(tidal).await?)) });
-                    self.spawn(async move { Ok(Msg::Favorites(t.favorite_ids().await?)) });
-                    self.spawn(async move { Ok(Msg::Folders(u.folder("root").await?)) });
-                }
+                Msg::Continue(..) | Msg::Ready(..) | Msg::Done => {}
                 Msg::Favorites(ids) => self.favorites = ids,
-                Msg::Folders(entries) => self.folders = entries,
-                Msg::Error(e) => {
-                    if matches!(self.page, Page::Loading) {
-                        self.page = self.back.pop().unwrap_or(Page::Search(Results::default()));
-                    }
-                    (self.busy, self.error) = (false, Some(e));
-                }
-                Msg::Player(Event::Ended) if self.repeat == Repeat::One => {
-                    if let Some(i) = self.index {
+                Msg::Folders(cards) => self.folders = cards,
+                Msg::Lyrics(id, lyrics) => (self.lyrics, self.lyric_line) = (Some((id, Some(lyrics))), None),
+                Msg::Error(e) => (self.busy, self.loading, self.error) = (false, false, Some(e)),
+                Msg::Player(Event::Ended) if self.queue.repeat == Repeat::One => {
+                    if let Some(i) = self.queue.index {
                         self.play(i);
                     }
                 }
@@ -547,13 +519,15 @@ impl App {
                 _ => {}
             }
         }
-        let state = np::State {
-            playback: match (self.current(), playing) {
-                (None, _) => np::Playback::Stopped,
-                (Some(_), true) => np::Playback::Playing,
-                (Some(_), false) => np::Playback::Paused,
-            },
-            track: self.current().map(|t| np::Track {
+        let current = self.queue.current();
+        let playback = match (current, playing) {
+            (None, _) => np::Playback::Stopped,
+            (Some(_), true) => np::Playback::Playing,
+            (Some(_), false) => np::Playback::Paused,
+        };
+        let shown = (current.map(|t| t.id), playback);
+        if shown != self.shown {
+            let track = current.map(|t| np::Track {
                 id: t.id.to_string(),
                 title: t.title.clone(),
                 artists: vec![t.artist.clone()],
@@ -561,13 +535,10 @@ impl App {
                 duration: Some(Duration::from_secs(t.duration.into())),
                 art_url: t.cover.as_deref().map(|c| tidal::image(c, 640)),
                 ..Default::default()
-            }),
-            position: Duration::from_secs_f64(self.player.status.position()),
-            ..Default::default()
-        };
-        if state.playback != self.shown.playback || state.track != self.shown.track {
-            self.controls.update(state.clone());
-            self.shown = state;
+            });
+            let position = Duration::from_secs_f64(self.player.status.position());
+            self.controls.update(np::State { playback, track, position, ..Default::default() });
+            self.shown = shown;
         }
     }
 
@@ -607,41 +578,44 @@ impl App {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn sidebar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let open = self.page.as_ref().map(|p| &p.source);
         egui::Panel::left("nav").exact_size(180.0).show(ui, |ui| {
             ui.add_space(12.0);
-            let mut item = |ui: &mut Ui, selected: bool, text: &str, action: Action| {
+            let item = |ui: &mut Ui, selected: bool, text: &str| {
                 let button = egui::Button::selectable(selected, RichText::new(text).size(15.0)).truncate();
-                let response = ui.add_sized([ui.available_width(), 28.0], button);
-                if response.clicked() {
+                ui.add_sized([ui.available_width(), 28.0], button)
+            };
+            let mut nav = |ui: &mut Ui, text: &str, selected: bool, action: Action| {
+                if item(ui, selected, text).clicked() {
                     actions.push(action);
                 }
-                response
             };
-            item(ui, matches!(self.page, Page::Home(_)), "Home", Action::Home);
-            item(ui, matches!(self.page, Page::Search(_)), "Search", Action::SearchPage);
-            item(ui, matches!(self.page, Page::Queue), "Queue", Action::Queue);
+            nav(ui, "Home", open == Some(&Source::Home), Action::Open(Source::Home));
+            nav(ui, "Search", matches!(open, Some(Source::Search(_))), Action::FocusSearch);
+            nav(ui, "Queue", self.side == Some(Side::Queue), Action::Side(Side::Queue));
             ui.add_space(16.0);
             ui.label(RichText::new("YOUR COLLECTION").small().weak());
-            item(ui, matches!(self.page, Page::Tracks(_)), "Tracks", Action::Library(Library::Tracks));
-            item(ui, matches!(self.page, Page::Albums(_)), "Albums", Action::Library(Library::Albums));
-            item(ui, matches!(self.page, Page::Artists(_)), "Artists", Action::Library(Library::Artists));
-            let root = matches!(&self.page, Page::Playlists(id, ..) if id == "root");
-            item(ui, root, "Playlists", Action::Library(Library::Playlists));
+            for (text, source) in [("Tracks", Source::Tracks), ("Albums", Source::Albums), ("Artists", Source::Artists), ("Playlists", Source::playlists())] {
+                nav(ui, text, open == Some(&source), Action::Open(source));
+            }
             ui.add_space(16.0);
             ui.label(RichText::new("PLAYLISTS").small().weak());
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                for entry in &self.folders {
-                    match entry {
-                        Entry::Folder { id, name, count } => {
-                            let open = matches!(&self.page, Page::Playlists(page, ..) if page == id);
-                            let response = item(ui, open, &format!("📁 {name}"), Action::Folder(id.clone(), name.clone()));
-                            response.on_hover_text(format!("{count} playlists"));
-                        }
-                        Entry::Playlist(p) => {
-                            let open = matches!(&self.page, Page::Playlist(page, _) if page.id == p.id);
-                            item(ui, open, &p.title, Action::Playlist(p.id.clone()));
-                        }
+                for card in &self.folders {
+                    let (text, selected) = match (card, open) {
+                        (Card::Folder { id, name, .. }, Some(Source::Folder(open, _))) => (format!("📁 {name}"), open == id),
+                        (Card::Folder { name, .. }, _) => (format!("📁 {name}"), false),
+                        (Card::Playlist(p), Some(Source::Playlist(open))) => (p.title.clone(), *open == p.id),
+                        (Card::Playlist(p), _) => (p.title.clone(), false),
+                        _ => continue,
+                    };
+                    let response = item(ui, selected, &text);
+                    if let Card::Folder { count, .. } = card {
+                        response.clone().on_hover_text(format!("{count} playlists"));
+                    }
+                    if response.clicked() {
+                        actions.push(Action::Open(Source::open(card)));
                     }
                 }
             });
@@ -653,35 +627,30 @@ impl App {
         let mut save = false;
         egui::Panel::bottom("player").exact_size(88.0).show(ui, |ui| {
             ui.columns(3, |cols| {
-                let track = self.index.and_then(|i| self.queue.get(i));
+                let track = self.queue.current();
                 cols[0].horizontal_centered(|ui| {
                     if let Some(t) = track {
                         let cover = picture(ui, art(t.cover.as_deref(), 160), 60.0, false);
                         if cover.hovered() {
                             ui.painter().rect_filled(cover.rect, 4.0, Color32::from_black_alpha(90));
                         }
-                        if let Some(id) = t.album_id
-                            && cover.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
-                        {
-                            actions.push(Action::Album(id));
-                        }
+                        let title_clicked = |ui: &mut Ui| link_text(ui, RichText::new(&t.title).strong()).clicked();
+                        let mut album = clickable(cover).clicked();
                         ui.vertical(|ui| {
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 heart(ui, t.id, &self.favorites, actions);
-                                let title = link_text(ui, RichText::new(&t.title).strong());
-                                if let Some(id) = t.album_id
-                                    && title.clicked()
-                                {
-                                    actions.push(Action::Album(id));
-                                }
+                                album |= title_clicked(ui);
                             });
-                            if let Some(id) = t.artist_id
-                                && ui.link(&t.artist).clicked()
+                            if ui.link(&t.artist).clicked()
+                                && let Some(id) = t.artist_id
                             {
-                                actions.push(Action::Artist(id));
+                                actions.push(Action::Open(Source::Artist(id)));
                             }
                         });
+                        if album && let Some(id) = t.album_id {
+                            actions.push(Action::Open(Source::Album(id)));
+                        }
                     }
                 });
                 cols[1].vertical_centered(|ui| {
@@ -689,26 +658,20 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space((ui.available_width() - 210.0) / 2.0);
                         let text = ui.visuals().text_color();
-                        let button = |s: &str, size: f32, on: bool| {
-                            let color = if on { ACCENT } else { text };
-                            egui::Button::new(RichText::new(s).size(size).color(color)).frame(false)
-                        };
-                        if ui.add(button("🔀", 16.0, self.unshuffled.is_some())).on_hover_text("Shuffle").clicked() {
-                            actions.push(Action::Shuffle);
-                        }
-                        if ui.add(button("⏮", 22.0, false)).clicked() {
-                            actions.push(Action::Prev);
-                        }
                         let toggle = if status.playing.load(Relaxed) { "⏸" } else { "▶" };
-                        if ui.add(button(toggle, 22.0, false)).clicked() {
-                            actions.push(Action::Toggle);
-                        }
-                        if ui.add(button("⏭", 22.0, false)).clicked() {
-                            actions.push(Action::Next);
-                        }
-                        let repeat = if self.repeat == Repeat::One { "🔂" } else { "🔁" };
-                        if ui.add(button(repeat, 16.0, self.repeat != Repeat::Off)).on_hover_text("Repeat").clicked() {
-                            actions.push(Action::Repeat);
+                        let repeat = if self.queue.repeat == Repeat::One { "🔂" } else { "🔁" };
+                        let buttons = [
+                            ("🔀", 16.0, self.queue.shuffled(), Action::Shuffle),
+                            ("⏮", 22.0, false, Action::Prev),
+                            (toggle, 22.0, false, Action::Toggle),
+                            ("⏭", 22.0, false, Action::Next),
+                            (repeat, 16.0, self.queue.repeat != Repeat::Off, Action::Repeat),
+                        ];
+                        for (icon, size, on, action) in buttons {
+                            let label = RichText::new(icon).size(size).color(if on { ACCENT } else { text });
+                            if ui.add(egui::Button::new(label).frame(false)).clicked() {
+                                actions.push(action);
+                            }
                         }
                     });
                     let total = track.map_or(0.0, |t| f64::from(t.duration));
@@ -716,10 +679,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(clock(position)).weak());
                         ui.spacing_mut().slider_width = ui.available_width() - 48.0;
-                        let slider = ui.add_enabled(
-                            track.is_some(),
-                            egui::Slider::new(&mut position, 0.0..=total.max(1.0)).show_value(false),
-                        );
+                        let slider = ui.add_enabled(track.is_some(), egui::Slider::new(&mut position, 0.0..=total.max(1.0)).show_value(false));
                         if slider.dragged() {
                             self.dragging = Some(position);
                         }
@@ -736,21 +696,18 @@ impl App {
                     if volume.changed() {
                         status.set_volume(self.volume * self.volume);
                     }
-                    if volume.drag_stopped() || (volume.changed() && !volume.dragged()) {
-                        save = true;
-                    }
+                    save = volume.drag_stopped() || (volume.changed() && !volume.dragged());
                     ui.label("🔊");
-                    let on = matches!(self.page, Page::Lyrics);
+                    let on = self.side == Some(Side::Lyrics);
                     let lyrics = RichText::new("Lyrics").color(if on { ACCENT } else { ui.visuals().text_color() });
                     if ui.add(egui::Button::new(lyrics).frame(false)).clicked() {
-                        actions.push(Action::Lyrics);
+                        actions.push(Action::Side(Side::Lyrics));
                     }
                     let (tier, format) = status.format.lock().unwrap().clone();
                     let (tier, label) = if track.is_some() { (tier, format) } else { (self.quality, self.quality.name().into()) };
                     ui.menu_button(RichText::new(label).color(tier_color(tier)).small(), |ui| {
                         for q in Quality::ALL {
-                            let name = RichText::new(q.name()).color(tier_color(q));
-                            if ui.radio(self.quality == q, name).clicked() {
+                            if ui.radio(self.quality == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
                                 actions.push(Action::Quality(q));
                                 ui.close();
                             }
@@ -764,109 +721,23 @@ impl App {
         }
     }
 
-    fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        if self.view.rows.is_none() || self.view.stale {
-            let rows = match &self.page {
-                Page::Tracks(tracks) | Page::Playlist(_, tracks) => arrange(tracks, &self.view),
-                Page::Albums(albums) => arrange(albums, &self.view),
-                Page::Artists(artists) => arrange(artists, &self.view),
-                Page::Playlists(_, _, entries) => arrange(entries, &self.view),
-                _ => Vec::new(),
-            };
-            (self.view.rows, self.view.stale) = (Some(rows), false);
-        }
-        let sorted = Some((self.view.sort, self.view.reverse));
-        let (playing, favorites) = (self.current().map(|t| t.id), &self.favorites);
-        let list = |queue| Rows { playing, favorites, queue };
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.back.is_empty(), egui::Button::new("⬅")).clicked() {
-                    actions.push(Action::Back);
-                }
-                if ui.add_enabled(!self.forward.is_empty(), egui::Button::new("➡")).clicked() {
-                    actions.push(Action::Forward);
-                }
-                let search = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search").desired_width(360.0));
-                if search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    actions.push(Action::Search);
-                }
-                if let Some(e) = &self.error {
-                    ui.colored_label(Color32::LIGHT_RED, e);
-                }
-            });
-            ui.add_space(8.0);
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &self.page {
-                Page::Loading => {
-                    ui.add_space(40.0);
-                    ui.vertical_centered(|ui| ui.spinner());
-                }
-                Page::Home(shelves) => {
-                    for (n, shelf) in shelves.iter().enumerate() {
-                        section(ui, &shelf.title);
-                        if !shelf.cards.is_empty() {
-                            egui::ScrollArea::horizontal().id_salt(("shelf", n)).show(ui, |ui| {
-                                ui.horizontal(|ui| shelf.cards.iter().for_each(|c| home_card(ui, c, actions)));
-                            });
-                        }
-                        if !shelf.tracks.is_empty() {
-                            list(false).show(ui, &shelf.tracks, None, true, None, actions);
-                        }
+    /// The queue or the current track's lyrics, beside the page.
+    fn side_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let Some(side) = self.side else { return };
+        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, queue: true };
+        egui::Panel::right("side").default_size(420.0).resizable(true).show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match side {
+                Side::Queue => {
+                    section(ui, "Queue");
+                    if self.queue.tracks.is_empty() {
+                        ui.label(RichText::new("Nothing queued. Right-click a track to add it.").weak());
                     }
+                    rows.show(ui, &self.queue.tracks, None, false, None, actions);
                 }
-                Page::Mix(mix, tracks) => {
-                    if let Some(start) = header(ui, mix.image.clone(), false, &mix.title, &mix.subtitle, false) {
-                        actions.push(start.action(tracks.clone(), 0));
-                    }
-                    list(false).show(ui, tracks, None, true, None, actions);
-                }
-                Page::Search(r) => search_page(ui, r, &list(false), actions),
-                Page::Album(album, tracks) => {
-                    let sub = format!("{} · {}", album.artist, album.year);
-                    if let Some(start) = header(ui, art(album.cover.as_deref(), 640), false, &album.title, &sub, false) {
-                        actions.push(start.action(tracks.clone(), 0));
-                    }
-                    list(false).show(ui, tracks, None, false, None, actions);
-                }
-                Page::Artist(artist, top, albums) => {
-                    if let Some(start) = header(ui, art(artist.picture.as_deref(), 480), true, &artist.name, "", true) {
-                        actions.push(start.action(top.clone(), artist.id));
-                    }
-                    section(ui, "Top tracks");
-                    list(false).show(ui, top, None, true, None, actions);
-                    section(ui, "Albums");
-                    album_cards(ui, albums, None, actions);
-                }
-                Page::Playlist(playlist, tracks) => {
-                    let sub = format!("{} tracks", playlist.count);
-                    if let Some(start) = header(ui, art(playlist.cover.as_deref(), 640), false, &playlist.title, &sub, false) {
-                        actions.push(start.action(in_order(tracks, self.view.rows.as_deref()), 0));
-                    }
-                    filter_box(ui, &mut self.view, "Filter playlist on title, artist or album");
-                    list(false).show(ui, tracks, self.view.rows.as_deref(), true, sorted, actions);
-                }
-                Page::Tracks(tracks) => {
-                    if let Some(start) = title_with_play(ui, "Tracks", !tracks.is_empty()) {
-                        actions.push(start.action(in_order(tracks, self.view.rows.as_deref()), 0));
-                    }
-                    filter_box(ui, &mut self.view, "Filter tracks on title, artist or album");
-                    list(false).show(ui, tracks, self.view.rows.as_deref(), true, sorted, actions);
-                }
-                Page::Albums(albums) => {
-                    grid_controls(ui, "Albums", &mut self.view, &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year], actions);
-                    album_cards(ui, albums, self.view.rows.as_deref(), actions);
-                }
-                Page::Artists(artists) => {
-                    grid_controls(ui, "Artists", &mut self.view, &[Sort::Added, Sort::Title], actions);
-                    artist_cards(ui, artists, self.view.rows.as_deref(), actions);
-                }
-                Page::Playlists(_, title, entries) => {
-                    grid_controls(ui, title, &mut self.view, &[Sort::Added, Sort::Title], actions);
-                    entry_cards(ui, entries, self.view.rows.as_deref(), actions);
-                }
-                Page::Lyrics => {
+                Side::Lyrics => {
                     let position = self.player.status.position();
-                    let track = self.index.and_then(|i| self.queue.get(i));
-                    let lyrics = self.lyrics.as_ref().filter(|(id, _)| track.is_some_and(|t| t.id == *id)).map(|l| &l.1);
+                    let track = self.queue.current().map(|t| t.id);
+                    let lyrics = self.lyrics.as_ref().filter(|(id, _)| Some(*id) == track).map(|(_, l)| l);
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| match (track, lyrics) {
                         (None, _) => {
@@ -875,22 +746,22 @@ impl App {
                         (Some(_), None | Some(None)) => {
                             ui.spinner();
                         }
-                        (Some(_), Some(Some(None))) => {
+                        (Some(_), Some(Some(l))) if l.synced.is_empty() && l.text.is_empty() => {
                             ui.label(RichText::new("No lyrics for this track.").weak());
                         }
-                        (Some(_), Some(Some(Some(l)))) if l.synced.is_empty() => {
-                            ui.label(RichText::new(&l.text).size(20.0));
+                        (Some(_), Some(Some(l))) if l.synced.is_empty() => {
+                            ui.label(RichText::new(&l.text).size(18.0));
                         }
-                        (Some(_), Some(Some(Some(l)))) => {
+                        (Some(_), Some(Some(l))) => {
                             let now = l.synced.iter().rposition(|(at, _)| *at <= position);
                             for (n, (at, words)) in l.synced.iter().enumerate() {
                                 let color = if Some(n) == now { ACCENT } else { Color32::from_gray(120) };
                                 let words = if words.is_empty() { "♪" } else { words };
-                                let line = ui.add(egui::Label::new(RichText::new(words).size(24.0).color(color)).sense(Sense::click()));
+                                let line = ui.add(egui::Label::new(RichText::new(words).size(22.0).color(color)).sense(Sense::click()));
                                 if Some(n) == now && self.lyric_line != now {
                                     line.scroll_to_me(Some(Align::Center));
                                 }
-                                if line.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                if clickable(line).clicked() {
                                     actions.push(Action::Seek(*at));
                                 }
                                 ui.add_space(6.0);
@@ -899,14 +770,35 @@ impl App {
                         }
                     });
                 }
-                Page::Queue => {
-                    section(ui, "Queue");
-                    if self.queue.is_empty() {
-                        ui.label(RichText::new("Nothing queued. Right-click a track to add it.").weak());
-                    }
-                    list(true).show(ui, &self.queue, None, true, None, actions);
+            });
+        });
+    }
+
+    fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, queue: false };
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!self.back.is_empty(), egui::Button::new("⬅")).clicked() {
+                    actions.push(Action::Step(true));
+                }
+                if ui.add_enabled(!self.forward.is_empty(), egui::Button::new("➡")).clicked() {
+                    actions.push(Action::Step(false));
+                }
+                let search = egui::TextEdit::singleline(&mut self.query).id(egui::Id::new("search")).hint_text("Search").desired_width(360.0);
+                if ui.add(search).lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.query.trim().is_empty() {
+                    actions.push(Action::Open(Source::Search(self.query.trim().into())));
+                }
+                if self.loading {
+                    ui.spinner();
+                }
+                if let Some(e) = &self.error {
+                    ui.colored_label(Color32::LIGHT_RED, e);
                 }
             });
+            ui.add_space(8.0);
+            if let Some(page) = &mut self.page {
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::widgets::page(ui, page, &rows, actions));
+            }
         });
     }
 }
@@ -919,234 +811,39 @@ impl eframe::App for App {
             return self.login_ui(ui);
         }
         let mut actions = Vec::new();
-        if ui.input(|i| i.key_pressed(Key::Space)) && ui.ctx().memory(|m| m.focused().is_none()) {
-            actions.push(Action::Toggle);
-        }
-        // The mouse's side buttons, Alt+arrows and the keyboard's Back key, as in a web browser.
+        let typing = ui.ctx().memory(|m| m.focused().is_some());
         ui.input(|i| {
+            if i.key_pressed(Key::Space) && !typing {
+                actions.push(Action::Toggle);
+            }
+            // The mouse's side buttons, Alt+arrows and the keyboard's Back key, as in a web browser.
             let alt = |key| i.modifiers.alt && i.key_pressed(key);
             if i.pointer.button_pressed(egui::PointerButton::Extra1) || alt(Key::ArrowLeft) || i.key_pressed(Key::BrowserBack) {
-                actions.push(Action::Back);
+                actions.push(Action::Step(true));
             }
             if i.pointer.button_pressed(egui::PointerButton::Extra2) || alt(Key::ArrowRight) {
-                actions.push(Action::Forward);
+                actions.push(Action::Step(false));
             }
         });
-        if matches!(self.page, Page::Lyrics)
-            && let (Some(t), Some(tidal)) = (self.current(), self.tidal.clone())
-            && self.lyrics.as_ref().is_none_or(|(id, _)| *id != t.id)
+        if self.side == Some(Side::Lyrics)
+            && let (Some(id), Some(tidal)) = (self.queue.current().map(|t| t.id), self.tidal.clone())
+            && self.lyrics.as_ref().is_none_or(|(loaded, _)| *loaded != id)
         {
-            let id = t.id;
             self.lyrics = Some((id, None));
             self.spawn(async move { Ok(Msg::Lyrics(id, tidal.lyrics(id).await?)) });
         }
         self.player_bar(ui, &mut actions);
         self.sidebar(ui, &mut actions);
+        self.side_panel(ui, &mut actions);
         self.content(ui, &mut actions);
         for action in actions {
             self.apply(action);
         }
+        // The clock moves once a second; lyrics need finer steps.
         if self.player.status.playing.load(Relaxed) {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
+            let step = if self.side == Some(Side::Lyrics) { 250 } else { 1000 };
+            ui.ctx().request_repaint_after(Duration::from_millis(step));
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-enum Sort {
-    #[default]
-    Added,
-    Title,
-    Artist,
-    Album,
-    Year,
-    Duration,
-}
-
-impl Sort {
-    const ALL: [Sort; 6] = [Sort::Added, Sort::Title, Sort::Artist, Sort::Album, Sort::Year, Sort::Duration];
-
-    fn label(self, reverse: bool) -> &'static str {
-        match (self, reverse) {
-            (Sort::Added, false) => "Recently added",
-            (Sort::Added, true) => "Oldest added",
-            (Sort::Title, false) => "A–Z",
-            (Sort::Title, true) => "Z–A",
-            (Sort::Artist, false) => "Artist A–Z",
-            (Sort::Artist, true) => "Artist Z–A",
-            (Sort::Album, false) => "Album A–Z",
-            (Sort::Album, true) => "Album Z–A",
-            (Sort::Year, false) => "Newest",
-            (Sort::Year, true) => "Oldest",
-            (Sort::Duration, false) => "Shortest",
-            (Sort::Duration, true) => "Longest",
-        }
-    }
-}
-
-fn filter_box(ui: &mut Ui, view: &mut View, hint: &str) {
-    let filter = egui::TextEdit::singleline(&mut view.filter).hint_text(hint).desired_width(f32::INFINITY);
-    if ui.add(filter).changed() {
-        view.stale = true;
-        ui.ctx().request_repaint();
-    }
-    ui.add_space(8.0);
-}
-
-/// Title, filter and sort dropdown for the card grids; picking the current sort again reverses it.
-fn grid_controls(ui: &mut Ui, title: &str, view: &mut View, sorts: &[Sort], actions: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        section(ui, title);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            egui::ComboBox::from_id_salt("sort").selected_text(view.sort.label(view.reverse)).show_ui(ui, |ui| {
-                for &sort in sorts {
-                    let selected = view.sort == sort;
-                    if ui.selectable_label(selected, sort.label(selected && view.reverse)).clicked() {
-                        actions.push(Action::Sort(sort));
-                    }
-                }
-            });
-            let filter = egui::TextEdit::singleline(&mut view.filter).hint_text("Filter").desired_width(220.0);
-            if ui.add(filter).changed() {
-                view.stale = true;
-                ui.ctx().request_repaint();
-            }
-        });
-    });
-}
-
-/// The filter and sort of a list page, and the resulting row order (None until recomputed).
-#[derive(Default)]
-struct View {
-    filter: String,
-    sort: Sort,
-    reverse: bool,
-    rows: Option<Vec<usize>>,
-    /// The filter or sort changed; `rows` still holds the old order until recomputed.
-    stale: bool,
-}
-
-trait Sortable {
-    /// Lowercase text the filter matches.
-    fn text(&self) -> String;
-    fn key(&self, sort: Sort) -> (u32, String);
-}
-
-impl Sortable for Track {
-    fn text(&self) -> String {
-        format!("{} {} {}", self.title, self.artist, self.album).to_lowercase()
-    }
-
-    fn key(&self, sort: Sort) -> (u32, String) {
-        match sort {
-            Sort::Duration => (self.duration, String::new()),
-            Sort::Artist => (0, self.artist.to_lowercase()),
-            Sort::Album => (0, self.album.to_lowercase()),
-            _ => (0, self.title.to_lowercase()),
-        }
-    }
-}
-
-impl Sortable for Album {
-    fn text(&self) -> String {
-        format!("{} {}", self.title, self.artist).to_lowercase()
-    }
-
-    fn key(&self, sort: Sort) -> (u32, String) {
-        match sort {
-            Sort::Year => (u32::MAX - self.year.parse().unwrap_or(0), String::new()),
-            Sort::Artist => (0, self.artist.to_lowercase()),
-            _ => (0, self.title.to_lowercase()),
-        }
-    }
-}
-
-impl Sortable for Artist {
-    fn text(&self) -> String {
-        self.name.to_lowercase()
-    }
-
-    fn key(&self, _: Sort) -> (u32, String) {
-        (0, self.name.to_lowercase())
-    }
-}
-
-impl Sortable for Entry {
-    fn text(&self) -> String {
-        match self {
-            Entry::Folder { name, .. } => name.to_lowercase(),
-            Entry::Playlist(p) => p.title.to_lowercase(),
-        }
-    }
-
-    /// Folders before playlists, then by name.
-    fn key(&self, _: Sort) -> (u32, String) {
-        (u32::from(matches!(self, Entry::Playlist(_))), self.text())
-    }
-}
-
-/// Which remembered sort a page uses.
-fn page_key(page: &Page) -> Option<&'static str> {
-    match page {
-        Page::Tracks(_) => Some("tracks"),
-        Page::Albums(_) => Some("albums"),
-        Page::Artists(_) => Some("artists"),
-        Page::Playlists(..) => Some("playlists"),
-        Page::Playlist(..) => Some("playlist"),
-        _ => None,
-    }
-}
-
-fn entry_cards(ui: &mut Ui, entries: &[Entry], order: Option<&[usize]>, actions: &mut Vec<Action>) {
-    ui.horizontal_wrapped(|ui| {
-        for entry in ordered(entries, order) {
-            match entry {
-                Entry::Folder { id, name, count } => {
-                    let (title, sub) = (format!("📁 {name}"), format!("Folder · {count} playlists"));
-                    card(ui, None, false, &title, &sub, Action::Folder(id.clone(), name.clone()), None, actions);
-                }
-                Entry::Playlist(p) => playlist_card(ui, p, actions),
-            }
-        }
-    });
-}
-
-fn arrange<T: Sortable>(items: &[T], view: &View) -> Vec<usize> {
-    let filter = view.filter.to_lowercase();
-    let mut rows: Vec<usize> = (0..items.len()).filter(|&i| filter.is_empty() || items[i].text().contains(&filter)).collect();
-    if view.sort != Sort::Added {
-        rows.sort_by_cached_key(|&i| items[i].key(view.sort));
-    }
-    if view.reverse {
-        rows.reverse();
-    }
-    rows
-}
-
-/// Items in the given row order, or as they are.
-fn ordered<'a, T>(items: &'a [T], order: Option<&'a [usize]>) -> impl Iterator<Item = &'a T> {
-    (0..order.map_or(items.len(), <[usize]>::len)).map(move |p| &items[order.map_or(p, |o| o[p])])
-}
-
-fn in_order(tracks: &[Track], order: Option<&[usize]>) -> Vec<Track> {
-    ordered(tracks, order).cloned().collect()
-}
-
-fn shuffle<T>(items: &mut [T]) {
-    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
-    for i in (1..items.len()).rev() {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        items.swap(i, (seed % (i as u64 + 1)) as usize);
-    }
-}
-
-fn tier_color(quality: Quality) -> Color32 {
-    match quality {
-        Quality::Max => GOLD,
-        Quality::High => ACCENT,
-        Quality::Low => Color32::from_gray(170),
     }
 }
 
@@ -1154,435 +851,21 @@ fn settings_path(session: &Path) -> PathBuf {
     session.with_file_name("settings.txt")
 }
 
-type Sorts = HashMap<&'static str, (Sort, bool)>;
-
-/// `key=value` lines: quality, volume and each page's sort (`sort.albums=Title reversed`).
-fn load_settings(session: &Path) -> (Quality, f32, Sorts) {
+/// `key=value` lines: quality, volume and each page kind's sort (`sort.albums=Title reversed`).
+fn load_settings(session: &Path) -> (Quality, f32, HashMap<String, (Sort, bool)>) {
     let text = std::fs::read_to_string(settings_path(session)).unwrap_or_default();
-    let (mut quality, mut volume, mut sorts) = (Quality::Max, 1.0, Sorts::new());
+    let (mut quality, mut volume, mut sorts) = (Quality::Max, 1.0, HashMap::new());
     for (key, value) in text.lines().filter_map(|l| l.split_once('=')) {
         match key {
             "quality" => quality = Quality::parse(value).unwrap_or(quality),
             "volume" => volume = value.parse().unwrap_or(volume),
             _ => {
-                let page = ["tracks", "albums", "artists", "playlists", "playlist"].into_iter().find(|p| key == format!("sort.{p}"));
                 let (name, reversed) = value.split_once(' ').map_or((value, false), |(n, r)| (n, r == "reversed"));
-                let sort = Sort::ALL.into_iter().find(|s| format!("{s:?}") == name);
-                if let (Some(page), Some(sort)) = (page, sort) {
-                    sorts.insert(page, (sort, reversed));
+                if let (Some(page), Some(sort)) = (key.strip_prefix("sort."), Sort::ALL.into_iter().find(|s| format!("{s:?}") == name)) {
+                    sorts.insert(page.to_string(), (sort, reversed));
                 }
             }
         }
     }
     (quality, volume, sorts)
-}
-
-fn clock(seconds: f64) -> String {
-    let s = seconds as u64;
-    format!("{}:{:02}", s / 60, s % 60)
-}
-
-fn section(ui: &mut Ui, title: &str) {
-    ui.add_space(16.0);
-    ui.label(RichText::new(title).size(20.0).strong());
-    ui.add_space(6.0);
-}
-
-/// How to start a list from its page's buttons.
-enum Start {
-    Play,
-    Shuffle,
-    Radio,
-}
-
-impl Start {
-    /// `id` is the artist whose radio the Radio button starts.
-    fn action(self, tracks: Vec<Track>, id: u64) -> Action {
-        match self {
-            Start::Play => Action::Play(tracks, 0),
-            Start::Shuffle => Action::ShufflePlay(tracks),
-            Start::Radio => Action::ArtistRadio(id),
-        }
-    }
-}
-
-fn start_buttons(ui: &mut Ui, radio: bool) -> Option<Start> {
-    let mut start = None;
-    ui.horizontal(|ui| {
-        if ui.button(RichText::new("▶  Play").size(16.0)).clicked() {
-            start = Some(Start::Play);
-        }
-        if ui.button(RichText::new("🔀  Shuffle").size(16.0)).clicked() {
-            start = Some(Start::Shuffle);
-        }
-        if radio && ui.button(RichText::new("Artist radio").size(16.0)).clicked() {
-            start = Some(Start::Radio);
-        }
-    });
-    start
-}
-
-fn title_with_play(ui: &mut Ui, title: &str, can_play: bool) -> Option<Start> {
-    let mut start = None;
-    ui.horizontal(|ui| {
-        section(ui, title);
-        if can_play {
-            start = start_buttons(ui, false);
-        }
-    });
-    start
-}
-
-fn heart(ui: &mut Ui, id: u64, favorites: &HashSet<u64>, actions: &mut Vec<Action>) {
-    let on = favorites.contains(&id);
-    let color = if on { ACCENT } else { Color32::from_gray(90) };
-    let hint = if on { "Remove from your collection" } else { "Add to your collection" };
-    if ui.add(egui::Button::new(RichText::new("❤").color(color)).frame(false)).on_hover_text(hint).clicked() {
-        actions.push(Action::Favorite(id, !on));
-    }
-}
-
-/// A Tidal image id as a URL at one of its sizes.
-fn art(id: Option<&str>, size: u32) -> Option<String> {
-    id.map(|id| tidal::image(id, size))
-}
-
-/// Artwork, loaded only once it scrolls into view so long shelves and grids don't fill memory.
-/// Text that underlines on hover and clicks like a link, truncated to fit.
-fn link_text(ui: &mut Ui, text: RichText) -> egui::Response {
-    let response = ui.add(egui::Label::new(text).truncate().selectable(false).sense(Sense::click()));
-    if response.hovered() {
-        let stroke = egui::Stroke::new(1.0, ui.visuals().strong_text_color());
-        ui.painter().hline(response.rect.x_range(), response.rect.bottom() - 1.0, stroke);
-    }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-fn picture(ui: &mut Ui, url: Option<String>, side: f32, round: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
-    paint_picture(ui, url, rect, round);
-    response
-}
-
-fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
-    let radius = if round { rect.width() / 2.0 } else { 4.0 };
-    ui.painter().rect_filled(rect, radius, ui.visuals().faint_bg_color);
-    if let Some(url) = url
-        && ui.is_rect_visible(rect)
-    {
-        egui::Image::new(url).corner_radius(radius).paint_at(ui, rect);
-    }
-}
-
-fn home_card(ui: &mut Ui, card_data: &Card, actions: &mut Vec<Action>) {
-    match card_data {
-        Card::Album(a) => {
-            let cover = art(a.cover.as_deref(), 320);
-            card(ui, cover, false, &a.title, &a.artist, Action::Album(a.id), Some(Action::PlayAlbum(a.id)), actions);
-        }
-        Card::Artist(a) => {
-            let picture = art(a.picture.as_deref(), 320);
-            card(ui, picture, true, &a.name, "Artist", Action::Artist(a.id), Some(Action::ArtistRadio(a.id)), actions);
-        }
-        Card::Playlist(p) => playlist_card(ui, p, actions),
-        Card::Mix(m) => {
-            card(ui, m.image.clone(), false, &m.title, &m.subtitle, Action::Mix(m.clone()), Some(Action::PlayMix(m.id.clone())), actions);
-        }
-    }
-}
-
-/// Tidal's home feed, or your playlists if it can't be had.
-async fn home_page(tidal: Tidal) -> Result<Page> {
-    match tidal.home().await {
-        Ok(shelves) if !shelves.is_empty() => Ok(Page::Home(shelves)),
-        _ => Ok(Page::Playlists("root".into(), "Playlists".into(), tidal.folder("root").await?)),
-    }
-}
-
-/// Big artwork, title and Play / Shuffle (/ Artist radio) buttons.
-fn header(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle: &str, radio: bool) -> Option<Start> {
-    let mut start = None;
-    ui.horizontal(|ui| {
-        picture(ui, image, 200.0, round);
-        ui.vertical(|ui| {
-            ui.add_space(110.0);
-            ui.label(RichText::new(title).size(30.0).strong());
-            ui.label(RichText::new(subtitle).weak());
-            start = start_buttons(ui, radio);
-        });
-    });
-    ui.add_space(12.0);
-    start
-}
-
-const CARD: f32 = 160.0;
-
-/// Artwork with a title and subtitle. The whole card highlights on hover and opens on click;
-/// with a `play` action, a play button on the artwork plays it without opening.
-#[allow(clippy::too_many_arguments)]
-fn card(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle: &str, open: Action, play: Option<Action>, actions: &mut Vec<Action>) {
-    let pad = 8.0;
-    let (rect, response) = ui.allocate_exact_size(vec2(CARD + 2.0 * pad, CARD + 2.0 * pad + 40.0), Sense::click());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let hovered = response.hovered();
-    if hovered {
-        ui.painter().rect_filled(rect, 6.0, ui.visuals().widgets.hovered.weak_bg_fill);
-    }
-    let cover = Rect::from_min_size(rect.min + vec2(pad, pad), vec2(CARD, CARD));
-    paint_picture(ui, image, cover, round);
-    let line = |text: RichText| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), CARD, egui::TextStyle::Body);
-    let color = ui.visuals().text_color();
-    ui.painter().galley(cover.left_bottom() + vec2(0.0, 6.0), line(RichText::new(title).strong()), color);
-    ui.painter().galley(cover.left_bottom() + vec2(0.0, 24.0), line(RichText::new(subtitle).weak()), color);
-    let button = cover.right_bottom() - vec2(24.0, 24.0);
-    let on_button = response.hover_pos().is_some_and(|p| p.distance(button) <= 18.0);
-    if hovered && play.is_some() {
-        ui.painter().circle_filled(button, 18.0, if on_button { ACCENT } else { Color32::from_gray(235) });
-        triangle(ui, button + vec2(1.5, 0.0), 7.0, Direction::Right, Color32::BLACK);
-    }
-    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-        actions.push(match play {
-            Some(play) if on_button => play,
-            _ => open,
-        });
-    }
-}
-
-fn album_cards(ui: &mut Ui, albums: &[Album], order: Option<&[usize]>, actions: &mut Vec<Action>) {
-    ui.horizontal_wrapped(|ui| {
-        for a in ordered(albums, order) {
-            let sub = format!("{} · {}", a.artist, a.year);
-            card(ui, art(a.cover.as_deref(), 320), false, &a.title, &sub, Action::Album(a.id), Some(Action::PlayAlbum(a.id)), actions);
-        }
-    });
-}
-
-fn artist_cards(ui: &mut Ui, artists: &[Artist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
-    ui.horizontal_wrapped(|ui| {
-        for a in ordered(artists, order) {
-            let picture = art(a.picture.as_deref(), 320);
-            card(ui, picture, true, &a.name, "Artist", Action::Artist(a.id), Some(Action::ArtistRadio(a.id)), actions);
-        }
-    });
-}
-
-fn playlist_card(ui: &mut Ui, p: &Playlist, actions: &mut Vec<Action>) {
-    let (cover, sub) = (art(p.cover.as_deref(), 320), format!("{} tracks", p.count));
-    card(ui, cover, false, &p.title, &sub, Action::Playlist(p.id.clone()), Some(Action::PlayPlaylist(p.id.clone())), actions);
-}
-
-fn playlist_cards(ui: &mut Ui, playlists: &[Playlist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
-    ui.horizontal_wrapped(|ui| ordered(playlists, order).for_each(|p| playlist_card(ui, p, actions)));
-}
-
-fn search_page(ui: &mut Ui, r: &Results, rows: &Rows<'_>, actions: &mut Vec<Action>) {
-    if r.artists.is_empty() && r.albums.is_empty() && r.tracks.is_empty() && r.playlists.is_empty() {
-        ui.add_space(40.0);
-        ui.vertical_centered(|ui| ui.label(RichText::new("Search for artists, albums, tracks and playlists.").weak()));
-        return;
-    }
-    if !r.tracks.is_empty() {
-        section(ui, "Tracks");
-        rows.show(ui, &r.tracks, None, true, None, actions);
-    }
-    if !r.artists.is_empty() {
-        section(ui, "Artists");
-        artist_cards(ui, &r.artists, None, actions);
-    }
-    if !r.albums.is_empty() {
-        section(ui, "Albums");
-        album_cards(ui, &r.albums, None, actions);
-    }
-    if !r.playlists.is_empty() {
-        section(ui, "Playlists");
-        playlist_cards(ui, &r.playlists, None, actions);
-    }
-}
-
-fn cell(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
-    ui.allocate_ui_with_layout(vec2(width, ROW), Layout::left_to_right(Align::Center), |ui| {
-        ui.set_width(width);
-        add(ui);
-    });
-}
-
-/// How track rows behave: what is playing, which are favorites, and whether this list is the queue.
-struct Rows<'a> {
-    playing: Option<u64>,
-    favorites: &'a HashSet<u64>,
-    queue: bool,
-}
-
-const TIME: f32 = 56.0;
-const NUMBER: f32 = 36.0;
-const HEART: f32 = 28.0;
-
-impl Rows<'_> {
-    /// A table of tracks under clickable column headers when `sorted` is set (sort, reversed).
-    /// Click a title to play the list from there; right-click it for more.
-    fn show(
-        &self,
-        ui: &mut Ui,
-        tracks: &[Track],
-        order: Option<&[usize]>,
-        with_album: bool,
-        sorted: Option<(Sort, bool)>,
-        actions: &mut Vec<Action>,
-    ) {
-        let with_added = tracks.iter().any(|t| t.added.is_some());
-        let spacing = ui.spacing().item_spacing.x;
-        let free = ui.available_width() - NUMBER - TIME - HEART - spacing * 6.0;
-        let mut columns = vec![(Sort::Title, "TITLE", 0.4), (Sort::Artist, "ARTIST", 0.25)];
-        if with_album {
-            columns.push((Sort::Album, "ALBUM", 0.22));
-        }
-        if with_added {
-            columns.push((Sort::Added, "DATE ADDED", 0.13));
-        }
-        let total: f32 = columns.iter().map(|c| c.2).sum();
-        let width = |share: f32| free * share / total;
-        ui.horizontal(|ui| {
-            cell(ui, NUMBER, |ui| {
-                ui.label(RichText::new("#").small().weak());
-            });
-            for &(sort, name, share) in &columns {
-                cell(ui, width(share), |ui| column_header(ui, name, sort, sorted, actions));
-            }
-            cell(ui, TIME, |ui| column_header(ui, "TIME", Sort::Duration, sorted, actions));
-        });
-        ui.separator();
-        let full = ui.available_width();
-        for (pos, t) in ordered(tracks, order).enumerate() {
-            let row = Rect::from_min_size(ui.cursor().min, vec2(full, ROW));
-            // Rows scrolled out of view only take up space, so long playlists stay cheap to draw.
-            if !ui.is_rect_visible(row) {
-                ui.allocate_space(vec2(free, ROW));
-                continue;
-            }
-            let i = order.map_or(pos, |o| o[pos]);
-            let play = || if self.queue { Action::Jump(i) } else { Action::Play(in_order(tracks, order), pos) };
-            let hovered = ui.rect_contains_pointer(row);
-            if hovered {
-                ui.painter().rect_filled(row.expand2(vec2(4.0, 2.0)), 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
-            }
-            ui.horizontal(|ui| {
-                let color = if self.playing == Some(t.id) { ACCENT } else { ui.visuals().strong_text_color() };
-                cell(ui, NUMBER, |ui| {
-                    if hovered {
-                        let (rect, button) = ui.allocate_exact_size(vec2(ROW, ROW), Sense::click());
-                        let fill = if button.hovered() { ACCENT } else { ui.visuals().strong_text_color() };
-                        triangle(ui, rect.center(), 6.0, Direction::Right, fill);
-                        if button.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            actions.push(play());
-                        }
-                    } else {
-                        ui.label(RichText::new((pos + 1).to_string()).weak());
-                    }
-                });
-                cell(ui, width(0.4), |ui| {
-                    let title = ui.add(egui::Label::new(RichText::new(&t.title).color(color)).truncate().sense(Sense::click()));
-                    if title.clicked() {
-                        actions.push(play());
-                    }
-                    title.context_menu(|ui| self.menu(ui, tracks, i, actions));
-                });
-                cell(ui, width(0.25), |ui| {
-                    if ui.add(egui::Link::new(&t.artist)).clicked()
-                        && let Some(id) = t.artist_id
-                    {
-                        actions.push(Action::Artist(id));
-                    }
-                });
-                if with_album {
-                    cell(ui, width(0.22), |ui| {
-                        if ui.add(egui::Link::new(&t.album)).clicked()
-                            && let Some(id) = t.album_id
-                        {
-                            actions.push(Action::Album(id));
-                        }
-                    });
-                }
-                if with_added {
-                    cell(ui, width(0.13), |ui| {
-                        ui.label(RichText::new(t.added.as_deref().unwrap_or_default()).weak());
-                    });
-                }
-                cell(ui, TIME, |ui| {
-                    ui.label(RichText::new(clock(f64::from(t.duration))).weak());
-                });
-                heart(ui, t.id, self.favorites, actions);
-            });
-        }
-    }
-
-    fn menu(&self, ui: &mut Ui, tracks: &[Track], i: usize, actions: &mut Vec<Action>) {
-        let t = &tracks[i];
-        let mut item = |text: &str, action: Action| {
-            if ui.button(text).clicked() {
-                actions.push(action);
-                ui.close();
-            }
-        };
-        if self.queue {
-            if i > 0 {
-                item("Move up", Action::Move(i, i - 1));
-            }
-            if i + 1 < tracks.len() {
-                item("Move down", Action::Move(i, i + 1));
-            }
-            if self.playing != Some(t.id) {
-                item("Remove from queue", Action::Remove(i));
-            }
-        } else {
-            item("Play next", Action::PlayNext(t.clone()));
-            item("Add to queue", Action::AddToQueue(t.clone()));
-            item("Track radio", Action::TrackRadio(t.id));
-        }
-        if let Some(id) = t.album_id {
-            item("Go to album", Action::Album(id));
-        }
-        if let Some(id) = t.artist_id {
-            item("Go to artist", Action::Artist(id));
-        }
-    }
-}
-
-/// A column title; clickable with an arrow on the sorted column when the table sorts.
-fn column_header(ui: &mut Ui, name: &str, sort: Sort, sorted: Option<(Sort, bool)>, actions: &mut Vec<Action>) {
-    let Some((current, reverse)) = sorted else {
-        ui.label(RichText::new(name).small().weak());
-        return;
-    };
-    let active = current == sort;
-    let text = RichText::new(name).small();
-    let text = if active { text.color(ACCENT) } else { text.weak() };
-    let header = ui.horizontal(|ui| {
-        ui.label(text);
-        if active {
-            let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-            triangle(ui, rect.center(), 4.0, if reverse { Direction::Up } else { Direction::Down }, ACCENT);
-        }
-    });
-    let click = ui.interact(header.response.rect, ui.id().with(name), Sense::click());
-    if click.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-        actions.push(Action::Sort(sort));
-    }
-}
-
-enum Direction {
-    Up,
-    Down,
-    Right,
-}
-
-/// A filled triangle pointing `direction`, drawn rather than typed so it never depends on font coverage.
-fn triangle(ui: &Ui, c: egui::Pos2, size: f32, direction: Direction, fill: Color32) {
-    let points = match direction {
-        Direction::Down => vec![c + vec2(-size, -size / 2.0), c + vec2(size, -size / 2.0), c + vec2(0.0, size * 0.75)],
-        Direction::Up => vec![c + vec2(-size, size / 2.0), c + vec2(size, size / 2.0), c + vec2(0.0, -size * 0.75)],
-        Direction::Right => vec![c + vec2(-size * 0.6, -size), c + vec2(-size * 0.6, size), c + vec2(size, 0.0)],
-    };
-    ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::NONE));
 }

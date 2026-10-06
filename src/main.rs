@@ -6,7 +6,10 @@ mod cache;
 mod decode;
 mod fonts;
 mod player;
+mod queue;
 mod tidal;
+mod view;
+mod widgets;
 
 use std::io::Write;
 use std::sync::mpsc::{RecvTimeoutError, channel};
