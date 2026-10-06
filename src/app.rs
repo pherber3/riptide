@@ -1291,7 +1291,7 @@ impl App {
         };
         let (quality, lastfm_user) = (self.quality, self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.clone()));
         let (device, normalize, close_to_tray) = (self.device.clone(), self.normalize, self.close_to_tray);
-        let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 14, bottom: 0 });
+        let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 16, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The page's artwork colour, glowing down from the top.
             let cover = self.page.as_ref().and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());

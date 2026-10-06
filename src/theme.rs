@@ -106,7 +106,8 @@ pub fn install(ctx: &egui::Context) {
         s.spacing.button_padding = vec2(12.0, 6.0);
         s.spacing.interact_size.y = 28.0;
         s.spacing.menu_margin = egui::Margin::same(6);
-        s.spacing.scroll = egui::style::ScrollStyle::floating();
+        // Floating bars, but with room kept for them so they never cover what is at the right edge.
+        s.spacing.scroll = egui::style::ScrollStyle { floating_allocated_width: 12.0, ..egui::style::ScrollStyle::floating() };
         s.text_styles.insert(TextStyle::Body, FontId::proportional(14.0));
         s.text_styles.insert(TextStyle::Button, medium(14.0));
         s.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
