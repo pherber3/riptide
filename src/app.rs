@@ -677,8 +677,9 @@ impl App {
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 heart(ui, t.id, &self.favorites, actions);
+                                let title = link_text(ui, RichText::new(&t.title).strong());
                                 if let Some(id) = t.album_id
-                                    && link_text(ui, RichText::new(&t.title).strong()).clicked()
+                                    && title.clicked()
                                 {
                                     actions.push(Action::Album(id));
                                 }
