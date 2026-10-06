@@ -77,6 +77,9 @@ pub struct Track {
     pub duration: u32,
     /// When it was added to the playlist or collection, as YYYY-MM-DD.
     pub added: Option<String>,
+    /// The volume scale that brings it to Tidal's reference loudness without clipping.
+    #[serde(default)]
+    pub gain: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -557,6 +560,7 @@ fn track(v: &Value) -> Option<Track> {
         cover: image_id(&v["album"]["cover"]),
         duration: v["duration"].as_u64().unwrap_or(0) as u32,
         added: date(&v["dateAdded"]),
+        gain: v["replayGain"].as_f64().map(|db| 10f64.powf(db / 20.0).min(1.0 / v["peak"].as_f64().unwrap_or(1.0).max(0.01)) as f32),
     })
 }
 

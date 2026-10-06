@@ -64,7 +64,7 @@ fn main() -> Result<()> {
             let tidal = rt.block_on(Tidal::load(&session))?;
             let reader = rt.block_on(cache::track(&tidal, &cache_dir, id.parse()?, quality))?;
             let (tx, rx) = channel();
-            let player = Player::start(move |e| {
+            let player = Player::start(None, move |e| {
                 let _ = tx.send(e);
             });
             player.send(Cmd::Load(Box::new(decode::Decoder::open(reader)?)));

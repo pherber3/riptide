@@ -212,6 +212,9 @@ pub enum Action {
     CreatePlaylist(String, u64),
     ConnectLastFm,
     DisconnectLastFm,
+    /// Play through this output device, or the system default.
+    Device(Option<String>),
+    Normalize(bool),
     Toggle,
     Next,
     Prev,
@@ -280,6 +283,10 @@ pub struct App {
     /// it is maximized.
     window: Option<egui::Rect>,
     maximized: bool,
+    /// The output device by name, or the system default.
+    device: Option<String>,
+    /// Scale each track to Tidal's reference loudness.
+    normalize: bool,
     /// Scrobbling, when `data/lastfm.txt` has an API account.
     lastfm: Option<LastFm>,
     /// The track being listened to and when it started (Unix seconds), to scrobble when it ends.
@@ -301,7 +308,9 @@ impl App {
         crate::fonts::install(&ctx);
         ctx.add_image_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
         let (tx, rx) = channel();
-        let player = Player::start({
+        let session = tidal::session_path(dir);
+        let Saved { quality, volume, sorts, device, normalize } = load_settings(&session);
+        let player = Player::start(device.clone(), {
             let (tx, ctx) = (tx.clone(), ctx.clone());
             move |event| {
                 let _ = tx.send(Msg::Player(event));
@@ -312,8 +321,6 @@ impl App {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         });
-        let session = tidal::session_path(dir);
-        let (quality, volume, sorts) = load_settings(&session);
         let (queue, restored) = Queue::load(&queue_path(&session)).map_or((Queue::default(), None), |(q, at)| (q, Some(at)));
         let (window, maximized) = saved_window(&session).map_or((None, false), |(rect, max)| (Some(rect), max));
         player.status.set_volume(volume * volume);
@@ -341,6 +348,8 @@ impl App {
             restored,
             window,
             maximized,
+            device,
+            normalize,
             favorites: HashSet::new(),
             folders: Vec::new(),
             playlists: Vec::new(),
@@ -373,6 +382,10 @@ impl App {
 
     fn save_settings(&self) {
         let mut text = format!("quality={}\nvolume={}\nmaximized={}\n", self.quality.name(), self.volume, self.maximized);
+        text += &format!("normalize={}\n", self.normalize);
+        if let Some(device) = &self.device {
+            text += &format!("device={device}\n");
+        }
         if let Some(r) = self.window {
             text += &format!("window={},{},{},{}\n", r.min.x, r.min.y, r.width(), r.height());
         }
@@ -453,6 +466,12 @@ impl App {
             let decoder = tokio::task::spawn_blocking(move || Decoder::open(reader)).await??;
             Ok(Msg::Ready(id, Box::new(decoder)))
         });
+    }
+
+    /// The playing track's normalization, or none.
+    fn apply_gain(&self) {
+        let gain = self.queue.current().and_then(|t| t.gain).filter(|_| self.normalize);
+        self.player.status.set_gain(gain.unwrap_or(1.0));
     }
 
     fn stop(&mut self) {
@@ -537,6 +556,16 @@ impl App {
                     self.error = Some(format!("Add your Last.fm API key and secret to {} first", path.display()));
                 }
             },
+            Action::Device(device) => {
+                self.player.send(Cmd::Device(device.clone()));
+                self.device = device;
+                self.save_settings();
+            }
+            Action::Normalize(on) => {
+                self.normalize = on;
+                self.apply_gain();
+                self.save_settings();
+            }
             Action::DisconnectLastFm => {
                 if let Some(Err(e)) = self.lastfm.as_mut().map(LastFm::disconnect) {
                     self.error = Some(format!("{e:#}"));
@@ -603,6 +632,7 @@ impl App {
                     None => self.stop(),
                 },
                 Msg::Ready(id, decoder) if self.queue.current().is_some_and(|t| t.id == id) => {
+                    self.apply_gain();
                     self.player.send(Cmd::Load(decoder));
                     if let Some(seconds) = self.resume_at.take() {
                         self.player.send(Cmd::Seek(seconds));
@@ -966,6 +996,7 @@ impl App {
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: false };
         let (quality, lastfm_user) = (self.quality, self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.clone()));
+        let (device, normalize) = (self.device.clone(), self.normalize);
         let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The page's artwork colour, glowing down from the top.
@@ -1008,7 +1039,7 @@ impl App {
                     crate::widgets::page(ui, page, &rows, actions);
                     if matches!(page.body, Body::Settings) {
                         let data = self.session.parent().and_then(Path::parent).unwrap_or(Path::new("."));
-                        let state = crate::settings::State { quality, lastfm_user: lastfm_user.as_deref(), data };
+                        let state = crate::settings::State { quality, device: device.as_deref(), normalize, lastfm_user: lastfm_user.as_deref(), data };
                         crate::settings::page(ui, &state, actions);
                     }
                 });
@@ -1116,20 +1147,31 @@ fn settings_path(session: &Path) -> PathBuf {
 }
 
 /// `key=value` lines: quality, volume and each page kind's sort (`sort.albums=Title reversed`).
-fn load_settings(session: &Path) -> (Quality, f32, HashMap<String, (Sort, bool)>) {
+/// What `settings.txt` holds, besides the window.
+struct Saved {
+    quality: Quality,
+    volume: f32,
+    sorts: HashMap<String, (Sort, bool)>,
+    device: Option<String>,
+    normalize: bool,
+}
+
+fn load_settings(session: &Path) -> Saved {
     let text = std::fs::read_to_string(settings_path(session)).unwrap_or_default();
-    let (mut quality, mut volume, mut sorts) = (Quality::Max, 1.0, HashMap::new());
+    let mut s = Saved { quality: Quality::Max, volume: 1.0, sorts: HashMap::new(), device: None, normalize: false };
     for (key, value) in text.lines().filter_map(|l| l.split_once('=')) {
         match key {
-            "quality" => quality = Quality::parse(value).unwrap_or(quality),
-            "volume" => volume = value.parse().unwrap_or(volume),
+            "quality" => s.quality = Quality::parse(value).unwrap_or(s.quality),
+            "volume" => s.volume = value.parse().unwrap_or(s.volume),
+            "device" => s.device = Some(value.into()),
+            "normalize" => s.normalize = value == "true",
             _ => {
                 let (name, reversed) = value.split_once(' ').map_or((value, false), |(n, r)| (n, r == "reversed"));
                 if let (Some(page), Some(sort)) = (key.strip_prefix("sort."), Sort::ALL.into_iter().find(|s| format!("{s:?}") == name)) {
-                    sorts.insert(page.to_string(), (sort, reversed));
+                    s.sorts.insert(page.to_string(), (sort, reversed));
                 }
             }
         }
     }
-    (quality, volume, sorts)
+    s
 }

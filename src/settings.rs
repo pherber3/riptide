@@ -3,13 +3,15 @@ use std::path::Path;
 use egui::{Align, Layout, RichText, Ui};
 
 use crate::app::Action;
-use crate::theme::{SECONDARY, SURFACE, TEXT, medium};
+use crate::theme::{ACCENT, HOVER, SECONDARY, SURFACE, TEXT, medium};
 use crate::tidal::Quality;
 use crate::widgets::{section, tier_color};
 
 /// What the settings page shows.
 pub struct State<'a> {
     pub quality: Quality,
+    pub device: Option<&'a str>,
+    pub normalize: bool,
     pub lastfm_user: Option<&'a str>,
     pub data: &'a Path,
 }
@@ -31,6 +33,26 @@ pub fn page(ui: &mut Ui, state: &State, actions: &mut Vec<Action>) {
                 }
             }
         });
+        ui.separator();
+        row(ui, "Output device", "Where Riptide plays, whatever the system default is", |ui| {
+            egui::ComboBox::from_id_salt("device").width(260.0).selected_text(state.device.unwrap_or("System default")).show_ui(ui, |ui| {
+                if ui.selectable_label(state.device.is_none(), "System default").clicked() {
+                    actions.push(Action::Device(None));
+                }
+                // Listed only while the menu is open; nothing is opened to list them.
+                for name in fastframe_audio::output_device_names().unwrap_or_default() {
+                    if ui.selectable_label(state.device == Some(name.as_str()), &name).clicked() {
+                        actions.push(Action::Device(Some(name)));
+                    }
+                }
+            });
+        });
+        ui.separator();
+        row(ui, "Normalize volume", "Play every track at about the same loudness, as Tidal does", |ui| {
+            if switch(ui, state.normalize).clicked() {
+                actions.push(Action::Normalize(!state.normalize));
+            }
+        });
     });
     card(ui, "Connections", |ui| {
         let detail = match state.lastfm_user {
@@ -50,6 +72,16 @@ pub fn page(ui: &mut Ui, state: &State, actions: &mut Vec<Action>) {
             }
         });
     });
+}
+
+/// An on/off switch.
+fn switch(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
+    let t = ui.ctx().animate_bool(response.id, on);
+    ui.painter().rect_filled(rect, 11.0, HOVER.lerp_to_gamma(ACCENT, t));
+    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, TEXT);
+    crate::widgets::clickable(response)
 }
 
 fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
