@@ -201,7 +201,9 @@ impl App {
                 });
                 cols[1].vertical_centered(|ui| {
                     ui.add_space(12.0);
-                    ui.horizontal(|ui| {
+                    // A row as tall as the play button from the start, so every button centres on the same line.
+                    let row = Layout::left_to_right(Align::Center);
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), row, |ui| {
                         ui.spacing_mut().item_spacing.x = 14.0;
                         ui.add_space((ui.available_width() - 200.0) / 2.0);
                         let on = |on: bool| if on { p().accent } else { p().secondary };
