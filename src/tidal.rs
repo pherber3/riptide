@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use reqwest::Method;
 use serde_json::Value;
 use tidlers::TidalClient;
 use tidlers::auth::TidalAuth;
@@ -156,27 +158,34 @@ impl Tidal {
         Ok(Stream { parts })
     }
 
-    async fn get(&mut self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+    async fn request(&mut self, method: Method, path: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
         self.refresh().await?;
         let token = self.client.session.auth.access_token.clone().context("not signed in")?;
         let country = self.client.user_info.as_ref().map_or("US".into(), |u| u.country_code.clone());
-        let resp = self
+        let mut req = self
             .http
-            .get(format!("{API}/{path}"))
+            .request(method, format!("{API}/{path}"))
             .bearer_auth(token)
             .query(&[("countryCode", country.as_str())])
-            .query(query)
-            .send()
-            .await?;
-        Ok(resp.error_for_status()?.json().await?)
+            .query(query);
+        if !form.is_empty() {
+            req = req.form(form);
+        }
+        Ok(req.send().await?.error_for_status()?)
+    }
+
+    async fn get(&mut self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        Ok(self.request(Method::GET, path, query, &[]).await?.json().await?)
     }
 
     /// Every item of a paged list, up to `max`.
-    async fn items(&mut self, path: &str, max: usize) -> Result<Vec<Value>> {
+    async fn items(&mut self, path: &str, query: &[(&str, &str)], max: usize) -> Result<Vec<Value>> {
         let mut all = Vec::new();
         loop {
             let offset = all.len().to_string();
-            let page = self.get(path, &[("limit", "100"), ("offset", &offset)]).await?;
+            let mut page_query = vec![("limit", "50"), ("offset", offset.as_str())];
+            page_query.extend_from_slice(query);
+            let page = self.get(path, &page_query).await?;
             let items = page["items"].as_array().cloned().unwrap_or_default();
             let total = page["totalNumberOfItems"].as_u64().unwrap_or(0) as usize;
             let empty = items.is_empty();
@@ -200,22 +209,68 @@ impl Tidal {
 
     pub async fn album(&mut self, id: u64) -> Result<(Album, Vec<Track>)> {
         let info = self.get(&format!("albums/{id}"), &[]).await?;
-        let items = self.items(&format!("albums/{id}/items"), 1000).await?;
+        let items = self.items(&format!("albums/{id}/items"), &[], 1000).await?;
         Ok((album(&info).context("bad album")?, items.iter().filter_map(track).collect()))
     }
 
     pub async fn artist(&mut self, id: u64) -> Result<(Artist, Vec<Track>, Vec<Album>)> {
         let info = self.get(&format!("artists/{id}"), &[]).await?;
         let top = self.get(&format!("artists/{id}/toptracks"), &[("limit", "10")]).await?;
-        let albums = self.items(&format!("artists/{id}/albums"), 200).await?;
+        let albums = self.items(&format!("artists/{id}/albums"), &[], 200).await?;
         let albums = albums.iter().filter_map(album).collect();
         Ok((artist(&info).context("bad artist")?, list(&top["items"], track), albums))
     }
 
     pub async fn playlist(&mut self, id: &str) -> Result<(Playlist, Vec<Track>)> {
         let info = self.get(&format!("playlists/{id}"), &[]).await?;
-        let items = self.items(&format!("playlists/{id}/items"), 10_000).await?;
+        let items = self.items(&format!("playlists/{id}/items"), &[], 10_000).await?;
         Ok((playlist(&info).context("bad playlist")?, items.iter().filter_map(track).collect()))
+    }
+
+    fn user(&self) -> Result<u64> {
+        let info = self.client.user_info.as_ref().map(|u| u.user_id);
+        info.or(self.client.session.auth.user_id).context("not signed in")
+    }
+
+    /// A favorites list, newest first.
+    async fn favorites(&mut self, kind: &str) -> Result<Vec<Value>> {
+        let path = format!("users/{}/favorites/{kind}", self.user()?);
+        let items = self.items(&path, &[("order", "DATE"), ("orderDirection", "DESC")], 10_000).await?;
+        Ok(items.into_iter().map(|mut v| v["item"].take()).collect())
+    }
+
+    pub async fn favorite_tracks(&mut self) -> Result<Vec<Track>> {
+        Ok(self.favorites("tracks").await?.iter().filter_map(track).collect())
+    }
+
+    pub async fn favorite_albums(&mut self) -> Result<Vec<Album>> {
+        Ok(self.favorites("albums").await?.iter().filter_map(album).collect())
+    }
+
+    pub async fn favorite_artists(&mut self) -> Result<Vec<Artist>> {
+        Ok(self.favorites("artists").await?.iter().filter_map(artist).collect())
+    }
+
+    /// Your own playlists and the ones you follow, newest first.
+    pub async fn playlists(&mut self) -> Result<Vec<Playlist>> {
+        let path = format!("users/{}/playlistsAndFavoritePlaylists", self.user()?);
+        let items = self.items(&path, &[("order", "DATE"), ("orderDirection", "DESC")], 1000).await?;
+        Ok(items.iter().filter_map(|v| playlist(&v["playlist"])).collect())
+    }
+
+    pub async fn favorite_ids(&mut self) -> Result<HashSet<u64>> {
+        let v = self.get(&format!("users/{}/favorites/ids", self.user()?), &[]).await?;
+        Ok(v["TRACK"].as_array().into_iter().flatten().filter_map(|id| id.as_str()?.parse().ok()).collect())
+    }
+
+    pub async fn set_favorite(&mut self, id: u64, on: bool) -> Result<()> {
+        let path = format!("users/{}/favorites/tracks", self.user()?);
+        if on {
+            self.request(Method::POST, &path, &[], &[("trackIds", &id.to_string())]).await?;
+        } else {
+            self.request(Method::DELETE, &format!("{path}/{id}"), &[], &[]).await?;
+        }
+        Ok(())
     }
 }
 
