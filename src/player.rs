@@ -164,8 +164,11 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
         status.set_pending_seek(None);
         Ok(())
     };
-    // After the output changes rate or channels, the track carries on from where it was heard.
-    let reformat = |t: &mut Track, at: f64, format: (u32, usize)| -> Result<()> {
+    // After the output moves to another rate or channel count, the track carries on from where it
+    // was heard.
+    let reformat = |track: &mut Option<Track>, at: f64, format: (u32, usize)| -> Result<()> {
+        status.samples_per_second.store(u64::from(format.0) * format.1 as u64, Relaxed);
+        let Some(t) = track else { return Ok(()) };
         if t.decoder.can_seek() {
             return seek(t, at, format);
         }
@@ -238,14 +241,8 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
                 if !status.playing.load(Relaxed) {
                     output.pause();
                 }
-                let new = (output.sample_rate(), usize::from(output.channels()));
-                if new != format {
-                    format = new;
-                    status.samples_per_second.store(u64::from(format.0) * format.1 as u64, Relaxed);
-                }
-                if let Some(t) = &mut track {
-                    reformat(t, at, format)?;
-                }
+                format = (output.sample_rate(), usize::from(output.channels()));
+                reformat(&mut track, at, format)?;
             }
             Ok(Cmd::Toggle) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
@@ -253,12 +250,8 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
         if let Maintained::Reopened { sample_rate, channels, .. } = output.maintain()
             && (sample_rate, usize::from(channels)) != format
         {
-            let at = status.position();
             format = (sample_rate, usize::from(channels));
-            status.samples_per_second.store(u64::from(format.0) * format.1 as u64, Relaxed);
-            if let Some(t) = &mut track {
-                reformat(t, at, format)?;
-            }
+            reformat(&mut track, status.position(), format)?;
         }
         if let Some(t) = &mut track
             && let Some(seconds) = t.pending_seek

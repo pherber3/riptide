@@ -129,16 +129,19 @@ impl Queue {
 
 /// A random index below `n`.
 pub fn random(n: usize) -> usize {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as usize);
-    nanos % n.max(1)
+    (seed() % n.max(1) as u64) as usize
 }
 
 fn shuffle_slice<T>(items: &mut [T]) {
-    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+    let mut seed = seed() | 1;
     for i in (1..items.len()).rev() {
         seed ^= seed << 13;
         seed ^= seed >> 7;
         seed ^= seed << 17;
         items.swap(i, (seed % (i as u64 + 1)) as usize);
     }
+}
+
+fn seed() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
 }

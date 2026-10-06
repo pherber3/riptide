@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use crate::tidal::{Card, Track};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Sort {
     #[default]
     Added,
@@ -12,8 +14,6 @@ pub enum Sort {
 }
 
 impl Sort {
-    pub const ALL: [Sort; 6] = [Sort::Added, Sort::Title, Sort::Artist, Sort::Album, Sort::Year, Sort::Duration];
-
     pub fn label(self, reverse: bool) -> &'static str {
         match (self, reverse) {
             (Sort::Added, false) => "Recently added",

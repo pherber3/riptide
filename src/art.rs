@@ -12,8 +12,8 @@ enum Entry {
 }
 
 /// Loads Tidal artwork through a disk cache, decoding off the UI thread. Each decoded image is
-/// handed to egui's texture cache once and then dropped, so memory holds only the textures of
-/// what is on screen (the app forgets them on every page change).
+/// handed to egui's texture cache once and then dropped, and textures not drawn for a while are let
+/// go (see `sweep`), so memory holds little more than what is on screen.
 pub struct Art {
     dir: PathBuf,
     rt: tokio::runtime::Handle,
@@ -27,19 +27,44 @@ impl Art {
     }
 }
 
-/// Every artwork decoded since the last `forget`, with its colour for the glow behind its page.
-static TINTS: LazyLock<Mutex<HashMap<String, Color32>>> = LazyLock::new(Default::default);
+/// Each artwork decoded and not yet let go: its colour, for the glow behind its page, and when it
+/// was last drawn (egui time).
+static SHOWN: LazyLock<Mutex<HashMap<String, (Color32, f64)>>> = LazyLock::new(Default::default);
+/// How long artwork stays after it was last drawn, in seconds.
+const KEEP: f64 = 10.0;
 /// Downloads at once, so scrolling a long list doesn't queue hundreds against the track stream.
 static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(6);
 
 pub fn tint(uri: &str) -> Option<Color32> {
-    TINTS.lock().unwrap().get(uri).copied()
+    SHOWN.lock().unwrap().get(uri).map(|(tint, _)| *tint)
 }
 
-/// Drops all artwork textures (but not the icons, which egui would have to rasterize again).
-pub fn forget(ctx: &egui::Context) {
-    let uris: Vec<String> = TINTS.lock().unwrap().drain().map(|(uri, _)| uri).collect();
-    uris.iter().for_each(|uri| ctx.forget_image(uri));
+/// Notes that the artwork was drawn this frame.
+pub fn drawn(ctx: &egui::Context, uri: &str) {
+    if let Some((_, at)) = SHOWN.lock().unwrap().get_mut(uri) {
+        *at = ctx.input(|i| i.time);
+    }
+}
+
+/// Lets go of artwork not drawn for a while, so scrolling through a long list doesn't keep every
+/// cover it passed. Checks every couple of seconds.
+pub fn sweep(ctx: &egui::Context) {
+    static SWEPT: Mutex<f64> = Mutex::new(0.0);
+    let now = ctx.input(|i| i.time);
+    let mut swept = SWEPT.lock().unwrap();
+    if now - *swept < 2.0 {
+        return;
+    }
+    *swept = now;
+    let mut stale = Vec::new();
+    SHOWN.lock().unwrap().retain(|uri, (_, at)| {
+        let keep = now - *at <= KEEP;
+        if !keep {
+            stale.push(uri.clone());
+        }
+        keep
+    });
+    stale.iter().for_each(|uri| ctx.forget_image(uri));
 }
 
 /// The artwork's average colour, weighted toward its most colourful pixels and set to one
@@ -112,7 +137,7 @@ impl ImageLoader for Art {
                 .flatten();
             }
             if let Some(image) = &image {
-                TINTS.lock().unwrap().insert(uri.clone(), mood(image));
+                SHOWN.lock().unwrap().insert(uri.clone(), (mood(image), ctx.input(|i| i.time)));
             }
             let entry = image.map_or(Entry::Failed, |image| Entry::Ready(Arc::new(image)));
             entries.lock().unwrap().insert(uri, entry);

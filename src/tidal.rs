@@ -28,7 +28,7 @@ pub static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 /// Tidal's tiers: Low is AAC, High is 16-bit lossless FLAC, Max is hi-res FLAC.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Quality {
     Low,
     High,
@@ -122,9 +122,10 @@ pub struct Mix {
     pub image: Option<String>,
 }
 
-/// An album, artist or playlist, as saved to the user's collection.
+/// Something the user can save to their collection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Item {
+    Track(u64),
     Album(u64),
     Artist(u64),
     Playlist(String),
@@ -189,8 +190,9 @@ pub fn image(id: &str, size: u32) -> String {
     format!("https://resources.tidal.com/images/{}/{size}x{size}.jpg", id.replace('-', "/"))
 }
 
-pub fn session_path(dir: &Path) -> PathBuf {
-    dir.join("data").join("session.json")
+/// Where the sign-in is kept, in the app's data directory.
+pub fn session_path(data: &Path) -> PathBuf {
+    data.join("session.json")
 }
 
 fn client() -> (String, String) {
@@ -199,7 +201,7 @@ fn client() -> (String, String) {
     (id.into(), secret.into())
 }
 
-fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -332,23 +334,24 @@ impl Tidal {
         Ok(self.send(Method::GET, url, query, &[]).await?.json().await?)
     }
 
-    /// Every item of a paged list (v1 or v2), up to `max`: the first page, then the rest a few at a time.
+    /// Every item of a paged list (v1 or v2), up to `max`: the first page, then the rest a few at a
+    /// time, each parsed as it arrives so a long list never sits in memory as raw JSON.
     async fn items<T>(&self, url: &str, query: &[(&str, &str)], max: usize, parse: impl Fn(&Value) -> Option<T>) -> Result<Vec<T>> {
         const PAGE: usize = 50;
+        let parse = &parse;
         let page = |offset: usize| async move {
             let offset = offset.to_string();
             let mut paged = vec![("limit", "50"), ("offset", offset.as_str())];
             paged.extend_from_slice(query);
-            self.get(url, &paged).await
+            let v = self.get(url, &paged).await?;
+            let items: Vec<T> = v["items"].as_array().into_iter().flatten().filter_map(parse).collect();
+            anyhow::Ok((v["totalNumberOfItems"].as_u64().unwrap_or(0) as usize, items))
         };
-        let first = page(0).await?;
-        let total = first["totalNumberOfItems"].as_u64().unwrap_or(0) as usize;
-        let rest: Vec<Value> = stream::iter((PAGE..total.min(max)).step_by(PAGE)).map(page).buffered(6).try_collect().await?;
-        let items = std::iter::once(first).chain(rest).flat_map(|mut page| match page["items"].take() {
-            Value::Array(items) => items,
-            _ => Vec::new(),
-        });
-        Ok(items.filter_map(|item| parse(&item)).take(max).collect())
+        let (total, mut items) = page(0).await?;
+        let rest: Vec<_> = stream::iter((PAGE..total.min(max)).step_by(PAGE)).map(page).buffered(6).try_collect().await?;
+        items.extend(rest.into_iter().flat_map(|(_, items)| items));
+        items.truncate(max);
+        Ok(items)
     }
 
     pub async fn stream(&self, track_id: u64, quality: Quality) -> Result<Parts> {
@@ -366,7 +369,6 @@ impl Tidal {
     pub async fn search(&self, query: &str) -> Result<Vec<Shelf>> {
         let types = "ARTISTS,ALBUMS,TRACKS,PLAYLISTS";
         let v = self.get(&format!("{V1}/search"), &[("query", query), ("types", types), ("limit", "20")]).await?;
-        let shelf = |title: &str, cards: Vec<Card>, tracks| Shelf { cards, tracks, ..Shelf::named(title) };
         let cards = |key: &str, parse: fn(&Value) -> Option<Card>| list(&v[key]["items"], parse);
         // Tidal's best match: an artist, album or playlist gets a shelf of its own; a track goes first.
         let hit = &v["topHit"]["value"];
@@ -382,13 +384,13 @@ impl Tidal {
             tracks.insert(0, first);
         }
         let shelves = [
-            shelf("Top result", top.into_iter().collect(), Vec::new()),
-            shelf("Tracks", Vec::new(), tracks),
-            shelf("Artists", cards("artists", |v| artist(v).map(Card::Artist)), Vec::new()),
-            shelf("Albums", cards("albums", |v| album(v).map(Card::Album)), Vec::new()),
-            shelf("Playlists", cards("playlists", |v| playlist(v).map(Card::Playlist)), Vec::new()),
+            Shelf::cards("Top result", top.into_iter().collect()),
+            Shelf::tracks("Tracks", tracks),
+            Shelf::cards("Artists", cards("artists", |v| artist(v).map(Card::Artist))),
+            Shelf::cards("Albums", cards("albums", |v| album(v).map(Card::Album))),
+            Shelf::cards("Playlists", cards("playlists", |v| playlist(v).map(Card::Playlist))),
         ];
-        Ok(shelves.into_iter().filter(|s| !s.cards.is_empty() || !s.tracks.is_empty()).collect())
+        Ok(shelves.into_iter().filter(|s| !s.is_empty()).collect())
     }
 
     pub async fn album(&self, id: u64) -> Result<(Album, Vec<Track>)> {
@@ -408,7 +410,7 @@ impl Tidal {
         let (info, top, albums, singles, compilations, similar, bio) = tokio::join!(
             self.get(&url, &[]),
             self.get(&top_url, &[("limit", "10")]),
-            self.items(&albums_url, &[], 200, |v| album(v).map(Card::Album)),
+            releases(&[]),
             releases(SINGLES),
             releases(COMPILATIONS),
             self.get(&similar_url, &[("limit", "20")]),
@@ -440,7 +442,7 @@ impl Tidal {
             for item in module["items"].as_array()? {
                 shelf.add(item["type"].as_str()?, &item["data"]);
             }
-            (!shelf.cards.is_empty() || !shelf.tracks.is_empty()).then_some(shelf)
+            (!shelf.is_empty()).then_some(shelf)
         });
         Ok(shelves.collect())
     }
@@ -561,8 +563,7 @@ impl Tidal {
     pub async fn create_playlist(&self, name: &str, description: &str, public: bool) -> Result<Playlist> {
         let public = public.to_string();
         let query = [("name", name), ("description", description), ("folderId", "root"), ("isPublic", public.as_str())];
-        let url = format!("{V2}/my-collection/playlists/folders/create-playlist");
-        let v: Value = self.send(Method::PUT, &url, &query, &[]).await?.json().await?;
+        let v: Value = self.folders("create-playlist", &query).await?.json().await?;
         playlist(&v["data"]).context("Tidal didn't return the new playlist")
     }
 
@@ -599,10 +600,15 @@ impl Tidal {
     /// Changes the user's playlist folders: `remove` (a playlist the user made is deleted) or
     /// `move` into a folder ("root" is the top level). `item` is `playlist:<id>` or `folder:<id>`.
     pub async fn arrange(&self, action: &str, item: &str, folder: Option<&str>) -> Result<()> {
-        let (url, trn) = (format!("{V2}/my-collection/playlists/folders/{action}"), format!("trn:{item}"));
+        let trn = format!("trn:{item}");
         let mut query = vec![("trns", trn.as_str())];
         query.extend(folder.map(|f| ("folderId", f)));
-        self.send(Method::PUT, &url, &query, &[]).await.map(drop)
+        self.folders(action, &query).await.map(drop)
+    }
+
+    /// One of the playlist-folder calls (create, rename, move, remove), all PUTs on v2.
+    async fn folders(&self, action: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
+        self.send(Method::PUT, &format!("{V2}/my-collection/playlists/folders/{action}"), query, &[]).await
     }
 
     /// Moves the track at `from` so it ends up at `to` (positions in the playlist's own order).
@@ -611,13 +617,11 @@ impl Tidal {
     }
 
     pub async fn create_folder(&self, name: &str) -> Result<()> {
-        let url = format!("{V2}/my-collection/playlists/folders/create-folder");
-        self.send(Method::PUT, &url, &[("name", name), ("folderId", "root")], &[]).await.map(drop)
+        self.folders("create-folder", &[("name", name), ("folderId", "root")]).await.map(drop)
     }
 
     pub async fn rename_folder(&self, id: &str, name: &str) -> Result<()> {
-        let (url, trn) = (format!("{V2}/my-collection/playlists/folders/rename"), format!("trn:folder:{id}"));
-        self.send(Method::PUT, &url, &[("trn", trn.as_str()), ("name", name)], &[]).await.map(drop)
+        self.folders("rename", &[("trn", &format!("trn:folder:{id}")), ("name", name)]).await.map(drop)
     }
 
     /// Deletes a folder, first moving what is in it to the top level so no playlist goes with it.
@@ -633,20 +637,22 @@ impl Tidal {
         self.arrange("remove", &format!("folder:{id}"), None).await
     }
 
-    /// Saved track ids, and saved albums, artists and playlists.
-    pub async fn favorite_ids(&self) -> Result<(HashSet<u64>, HashSet<Item>)> {
+    /// Everything saved to the collection: tracks, albums, artists and playlists.
+    pub async fn saved(&self) -> Result<HashSet<Item>> {
         let v = self.get(&format!("{}/favorites/ids", self.user().await?), &[]).await?;
-        let ids = |kind: &str| v[kind].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>();
-        let numbers = |kind: &str| ids(kind).into_iter().filter_map(|id| id.parse().ok()).collect::<Vec<u64>>();
-        let mut saved: HashSet<Item> = numbers("ALBUM").into_iter().map(Item::Album).collect();
-        saved.extend(numbers("ARTIST").into_iter().map(Item::Artist));
-        saved.extend(ids("PLAYLIST").into_iter().map(Item::Playlist));
-        Ok((numbers("TRACK").into_iter().collect(), saved))
+        let ids = |kind: &str| v[kind].as_array().into_iter().flatten().filter_map(Value::as_str);
+        let number = |id: &str| id.parse().ok();
+        let mut saved: HashSet<Item> = ids("TRACK").filter_map(number).map(Item::Track).collect();
+        saved.extend(ids("ALBUM").filter_map(number).map(Item::Album));
+        saved.extend(ids("ARTIST").filter_map(number).map(Item::Artist));
+        saved.extend(ids("PLAYLIST").map(|id| Item::Playlist(id.into())));
+        Ok(saved)
     }
 
-    /// Saves an album, artist or playlist to the collection, or takes it out.
+    /// Saves something to the collection, or takes it out.
     pub async fn set_saved(&self, item: &Item, on: bool) -> Result<()> {
         let (kind, field, id) = match item {
+            Item::Track(id) => ("tracks", "trackIds", id.to_string()),
             Item::Album(id) => ("albums", "albumIds", id.to_string()),
             Item::Artist(id) => ("artists", "artistIds", id.to_string()),
             Item::Playlist(id) => ("playlists", "uuids", id.clone()),
@@ -656,16 +662,6 @@ impl Tidal {
             true => self.send(Method::POST, &url, &[], &[(field, &id)]).await?,
             false => self.send(Method::DELETE, &format!("{url}/{id}"), &[], &[]).await?,
         };
-        Ok(())
-    }
-
-    pub async fn set_favorite(&self, id: u64, on: bool) -> Result<()> {
-        let url = format!("{}/favorites/tracks", self.user().await?);
-        if on {
-            self.send(Method::POST, &url, &[], &[("trackIds", &id.to_string())]).await?;
-        } else {
-            self.send(Method::DELETE, &format!("{url}/{id}"), &[], &[]).await?;
-        }
         Ok(())
     }
 }

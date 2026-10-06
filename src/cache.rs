@@ -139,7 +139,11 @@ pub async fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Resu
     }
     let parts = tidal.stream(id, quality).await?;
     let (writer, reader) = create(&path)?;
-    let task = tokio::spawn(async move { fetch(&parts, writer).await });
+    let task = tokio::spawn(async move {
+        let mut writer = writer;
+        let result = fetch(&parts, &mut writer).await;
+        writer.finish(result.map_err(|e| e.to_string()));
+    });
     if let Some(active) = ACTIVE.lock().unwrap().get_mut(&path) {
         active.1 = Some(task.abort_handle());
     }
@@ -223,12 +227,7 @@ impl symphonia::core::io::MediaSource for Reader {
     }
 }
 
-async fn fetch(parts: &Parts, mut writer: Writer) {
-    let result = fetch_into(parts, &mut writer).await;
-    writer.finish(result.map_err(|e| e.to_string()));
-}
-
-async fn fetch_into(parts: &Parts, w: &mut Writer) -> anyhow::Result<()> {
+async fn fetch(parts: &Parts, w: &mut Writer) -> anyhow::Result<()> {
     let http = &*HTTP;
     match parts {
         Parts::Urls(urls) => {

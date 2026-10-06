@@ -4,6 +4,7 @@ mod app;
 mod art;
 mod cache;
 mod decode;
+mod dialogs;
 mod fonts;
 mod lastfm;
 mod player;
@@ -25,37 +26,36 @@ use tidal::{Quality, Tidal};
 pub const CACHE_BYTES: u64 = 2 << 30;
 pub const ART_BYTES: u64 = 256 << 20;
 
-/// The window and taskbar icon.
-fn icon() -> egui::IconData {
-    let image = image::load_from_memory(include_bytes!("../assets/riptide.png")).expect("bundled icon").to_rgba8();
-    egui::IconData { width: image.width(), height: image.height(), rgba: image.into_raw() }
-}
-
 fn main() -> Result<()> {
     let dir = std::env::current_exe()?.parent().expect("exe has a directory").to_path_buf();
-    let session = tidal::session_path(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data)?;
+    let session = tidal::session_path(&data);
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => {
             // One copy at a time: launching again brings the running one's window up.
-            let slot = fastframe_instance::Slot::at(dir.join("data"), "riptide");
+            let slot = fastframe_instance::Slot::at(&data, "riptide");
             let _guard = match slot.claim("show", app::surface_request) {
                 fastframe_instance::Claim::First(guard) => guard,
                 _ => return Ok(()),
             };
+            let settings = settings::Settings::load(&data);
+            let icon = egui::IconData { rgba: theme::logo(256), width: 256, height: 256 };
             let mut viewport = egui::ViewportBuilder::default()
                 .with_title("Riptide")
-                .with_icon(icon())
+                .with_icon(icon)
                 .with_inner_size([1200.0, 800.0])
-                .with_min_inner_size([800.0, 500.0]);
-            if let Some((rect, maximized)) = app::saved_window(&session) {
-                viewport = viewport.with_position(rect.min).with_inner_size(rect.size()).with_maximized(maximized);
+                .with_min_inner_size([800.0, 500.0])
+                .with_maximized(settings.maximized);
+            if let Some([x, y, width, height]) = settings.window {
+                viewport = viewport.with_position([x, y]).with_inner_size([width, height]);
             }
             let options = eframe::NativeOptions {
                 viewport,
                 ..Default::default()
             };
-            eframe::run_native("riptide", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir)?))))
+            eframe::run_native("riptide", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir, settings)?))))
                 .map_err(|e| anyhow!("{e}"))?;
         }
         ["play", id, rest @ ..] => {

@@ -1,10 +1,9 @@
-use std::collections::HashSet;
-
 use egui::{Align, Color32, Layout, Rect, Response, RichText, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
-use crate::app::{Action, Body, Head, Page, Source};
+use crate::app::{Action, Body, Head, Library, Page, Source};
+use crate::dialogs::{self, Target};
 use crate::theme::{ACCENT, DANGER, DIM, GOLD, HOVER, Icon, LINE, SECONDARY, SURFACE, TEXT, bold, medium, semibold};
-use crate::tidal::{self, Card, Item, Playlist, Quality, Track};
+use crate::tidal::{self, Card, Item, Quality, Track};
 use crate::view::{Sort, View, in_order, ordered};
 
 const CARD: f32 = 168.0;
@@ -130,15 +129,24 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response
     clickable(response)
 }
 
-pub fn heart(ui: &mut Ui, id: u64, favorites: &HashSet<u64>, visible: bool, actions: &mut Vec<Action>) {
-    let on = favorites.contains(&id);
+/// A menu entry that does `action`.
+pub fn menu_item(ui: &mut Ui, actions: &mut Vec<Action>, text: impl Into<egui::WidgetText>, action: Action) {
+    if ui.button(text).clicked() {
+        actions.push(action);
+        ui.close();
+    }
+}
+
+pub fn heart(ui: &mut Ui, id: u64, library: &Library, visible: bool, actions: &mut Vec<Action>) {
+    let item = Item::Track(id);
+    let on = library.saved.contains(&item);
     if !on && !visible {
         ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
         return;
     }
     let (icon, color, hint) = if on { (Icon::HeartFilled, ACCENT, "Remove from your collection") } else { (Icon::Heart, SECONDARY, "Add to your collection") };
     if icon_button(ui, icon, 16.0, color).on_hover_text(hint).clicked() {
-        actions.push(Action::Favorite(id, !on));
+        actions.push(Action::Save(item, !on));
     }
 }
 
@@ -155,6 +163,7 @@ fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
     if let Some(url) = url
         && ui.is_rect_visible(rect)
     {
+        crate::art::drawn(ui.ctx(), &url);
         // Artwork that can't be had leaves the plain tile rather than egui's error mark.
         let image = egui::Image::new(url).corner_radius(radius);
         if image.load_for_size(ui.ctx(), rect.size()).is_ok() {
@@ -230,7 +239,7 @@ pub enum Start {
 }
 
 /// The page title, with big artwork when it has some, and Play / Shuffle (/ Radio) buttons.
-fn header(ui: &mut Ui, head: &Head, can_play: bool, rows: &Rows, actions: &mut Vec<Action>) -> Option<Start> {
+fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: &mut Vec<Action>) -> Option<Start> {
     let mut start = None;
     let mut buttons = |ui: &mut Ui| {
         ui.horizontal(|ui| {
@@ -250,18 +259,18 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, rows: &Rows, actions: &mut V
                 actions.push(Action::CopyLink(link(item)));
             }
             match &head.item {
-                Some(Item::Playlist(id)) if rows.mine(id) => playlist_menu(ui, id, &head.title, rows.folders, actions),
+                Some(Item::Playlist(id)) if library.mine(id) => playlist_menu(ui, id, &head.title, &library.folders, actions),
                 // An artist is followed with a heart; an album or playlist is added to its list.
                 Some(item) => {
-                    let on = rows.saved.contains(item);
+                    let on = library.saved.contains(item);
                     let list = match item {
                         Item::Album(_) => "Albums",
                         Item::Playlist(_) => "Playlists",
-                        Item::Artist(_) => "Artists",
+                        Item::Artist(_) | Item::Track(_) => "Artists",
                     };
                     let icon = match (item, on) {
-                        (Item::Artist(_), true) => Icon::HeartFilled,
-                        (Item::Artist(_), false) => Icon::Heart,
+                        (Item::Artist(_) | Item::Track(_), true) => Icon::HeartFilled,
+                        (Item::Artist(_) | Item::Track(_), false) => Icon::Heart,
                         (_, true) => Icon::Check,
                         (_, false) => Icon::Plus,
                     };
@@ -312,31 +321,20 @@ fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: 
 
 /// Rename, move or delete one of the user's own playlists: its ⋯ menu, or right-click in the sidebar.
 pub fn playlist_actions(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: &mut Vec<Action>) {
-    {
-        ui.set_min_width(220.0);
-        ui.spacing_mut().button_padding = vec2(12.0, 7.0);
-        if ui.button("Rename").clicked() {
-            actions.push(Action::PlaylistForm(Target::Rename(id.into()), title.into()));
-            ui.close();
-        }
-        ui.menu_button("Move to folder", |ui| {
-            let named = folders.iter().filter_map(|c| match c {
-                Card::Folder { id, name, .. } => Some((id.as_str(), name.as_str())),
-                _ => None,
-            });
-            for (folder, name) in std::iter::once((crate::app::ROOT, "Top level")).chain(named) {
-                if ui.button(name).clicked() {
-                    actions.push(Action::MovePlaylist(id.into(), folder.into()));
-                    ui.close();
-                }
-            }
+    ui.set_min_width(220.0);
+    menu_item(ui, actions, "Rename", dialogs::form(Target::Rename(id.into()), title));
+    ui.menu_button("Move to folder", |ui| {
+        let named = folders.iter().filter_map(|c| match c {
+            Card::Folder { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
         });
-        if ui.button(RichText::new("Delete playlist").color(DANGER)).clicked() {
-            let text = "This deletes the playlist from your Tidal account. It can't be undone.";
-            actions.push(Action::Confirm(Box::new(Confirm::new(format!("Delete {title}?"), text, Action::DeletePlaylist(id.into())))));
-            ui.close();
+        for (folder, name) in std::iter::once((crate::app::ROOT, "Top level")).chain(named) {
+            menu_item(ui, actions, name, Action::MovePlaylist(id.into(), folder.into()));
         }
-    }
+    });
+    let text = "This deletes the playlist from your Tidal account. It can't be undone.";
+    let delete = dialogs::confirm(format!("Delete {title}?"), text, Action::DeletePlaylist(id.into()));
+    menu_item(ui, actions, RichText::new("Delete playlist").color(DANGER), delete);
 }
 
 /// An on/off switch.
@@ -349,83 +347,6 @@ pub fn switch(ui: &mut Ui, on: bool) -> egui::Response {
     clickable(response)
 }
 
-/// What the playlist dialog is for: a new playlist (with a track to put in it), or renaming one.
-pub enum Target {
-    Create(Option<u64>),
-    Rename(String),
-    CreateFolder,
-    RenameFolder(String),
-}
-
-pub struct PlaylistForm {
-    pub target: Target,
-    pub title: String,
-    pub description: String,
-    pub public: bool,
-}
-
-/// The Create playlist (or Rename playlist) dialog, as Tidal has it. Some(true) when saved,
-/// Some(false) when closed.
-pub fn playlist_dialog(ctx: &egui::Context, form: &mut PlaylistForm) -> Option<bool> {
-    let creating = matches!(form.target, Target::Create(_));
-    let heading = match form.target {
-        Target::Create(_) => "Create playlist",
-        Target::Rename(_) => "Rename playlist",
-        Target::CreateFolder => "Create folder",
-        Target::RenameFolder(_) => "Rename folder",
-    };
-    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
-    let modal = egui::Modal::new(egui::Id::new("playlist dialog")).frame(frame).show(ctx, |ui| {
-        ui.set_width(460.0);
-        let mut close = false;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(heading).font(bold(22.0)).color(TEXT));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| close = icon_button(ui, Icon::Close, 18.0, SECONDARY).clicked());
-        });
-        ui.add_space(16.0);
-        let title = ui.add(egui::TextEdit::singleline(&mut form.title).hint_text("Title").font(medium(16.0)).margin(vec2(14.0, 12.0)).desired_width(f32::INFINITY));
-        if ui.ctx().memory(|m| m.focused().is_none()) {
-            title.request_focus();
-        }
-        let enter = title.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if creating {
-            ui.add_space(10.0);
-            let description = egui::TextEdit::multiline(&mut form.description).hint_text("Write a description").char_limit(500).desired_rows(4);
-            ui.add(description.margin(vec2(14.0, 12.0)).desired_width(f32::INFINITY));
-            ui.label(RichText::new(format!("{}/500 characters", form.description.chars().count())).size(12.0).color(DIM));
-            ui.add_space(12.0);
-            egui::Frame::new().fill(HOVER).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Make it public").font(semibold(15.0)).color(TEXT));
-                        ui.label(RichText::new("Your playlist will be visible on your profile and to anyone.").size(13.0).color(SECONDARY));
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if switch(ui, form.public).clicked() {
-                            form.public = !form.public;
-                        }
-                    });
-                });
-            });
-        }
-        ui.add_space(16.0);
-        let ready = !form.title.trim().is_empty();
-        let save = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let button = egui::Button::new(RichText::new("Save").font(semibold(14.0)).color(Color32::BLACK)).fill(TEXT).corner_radius(20).min_size(vec2(88.0, 40.0));
-            ui.add_enabled(ready, button).clicked()
-        });
-        (close, ready && (save.inner || enter))
-    });
-    let (close, save) = modal.inner;
-    if save {
-        Some(true)
-    } else if close || modal.should_close() {
-        Some(false)
-    } else {
-        None
-    }
-}
-
 fn filter_box(ui: &mut Ui, view: &mut View) {
     search_field(ui, &mut view.filter, "Filter", 240.0, egui::Id::new(("filter", view.key)));
 }
@@ -433,7 +354,7 @@ fn filter_box(ui: &mut Ui, view: &mut View) {
 /// One page: header, then its track table, card grid or shelves.
 pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>) {
     let Page { head, body, view, .. } = page;
-    let start = head.as_ref().and_then(|head| header(ui, head, !body.tracks().is_empty(), rows, actions));
+    let start = head.as_ref().and_then(|head| header(ui, head, !body.tracks().is_empty(), rows.library, actions));
     let mut order = None;
     match body {
         Body::Tracks { tracks, album_column } => {
@@ -510,8 +431,12 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
     ui.add_space(24.0);
     let tracks = || in_order(body.tracks(), order);
     match (start, head) {
-        (Some(Start::Play), _) => actions.push(Action::PlayTracks(tracks(), 0)),
-        (Some(Start::Shuffle), _) => actions.push(Action::ShuffleTracks(tracks())),
+        (Some(Start::Play), _) => actions.push(Action::PlayTracks(tracks(), 0, false)),
+        (Some(Start::Shuffle), _) => {
+            let tracks = tracks();
+            let first = crate::queue::random(tracks.len());
+            actions.push(Action::PlayTracks(tracks, first, true));
+        }
         (Some(Start::Radio), Some(head)) => actions.extend(head.radio.clone().map(Action::Play)),
         _ => {}
     }
@@ -560,76 +485,10 @@ fn about(ui: &mut Ui, text: &str) {
     }
 }
 
-/// A question to confirm before something that can't be undone.
-pub struct Confirm {
-    pub title: String,
-    pub text: &'static str,
-    pub then: Action,
-}
-
-impl Confirm {
-    pub fn new(title: String, text: &'static str, then: Action) -> Self {
-        Self { title, text, then }
-    }
-}
-
-/// "Are you sure?": Some(true) to go ahead, Some(false) to cancel.
-pub fn confirm_dialog(ctx: &egui::Context, confirm: &Confirm) -> Option<bool> {
-    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
-    let modal = egui::Modal::new(egui::Id::new("confirm")).frame(frame).show(ctx, |ui| {
-        ui.set_width(400.0);
-        ui.add(egui::Label::new(RichText::new(&confirm.title).font(bold(20.0)).color(TEXT)).wrap());
-        ui.add_space(8.0);
-        ui.label(RichText::new(confirm.text).size(14.0).color(SECONDARY));
-        ui.add_space(20.0);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let delete = egui::Button::new(RichText::new("Delete").font(semibold(14.0)).color(Color32::WHITE)).fill(DANGER).corner_radius(20).min_size(vec2(88.0, 38.0));
-            let yes = ui.add(delete).clicked();
-            let cancel = egui::Button::new(RichText::new("Cancel").font(semibold(14.0)).color(TEXT)).fill(HOVER).corner_radius(20).min_size(vec2(88.0, 38.0));
-            let no = ui.add(cancel).clicked();
-            (yes, no)
-        })
-        .inner
-    });
-    let (yes, no) = modal.inner;
-    if yes {
-        Some(true)
-    } else if no || modal.should_close() {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// Who made a track: Tidal's credits, role by role. Some(()) when closed.
-pub fn credits_dialog(ctx: &egui::Context, title: &str, credits: &[(String, String)]) -> bool {
-    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
-    let modal = egui::Modal::new(egui::Id::new("credits")).frame(frame).show(ctx, |ui| {
-        ui.set_width(440.0);
-        let mut close = false;
-        ui.horizontal(|ui| {
-            ui.add(egui::Label::new(RichText::new(format!("Credits · {title}")).font(bold(20.0)).color(TEXT)).truncate());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| close = icon_button(ui, Icon::Close, 18.0, SECONDARY).clicked());
-        });
-        ui.add_space(12.0);
-        egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-            if credits.is_empty() {
-                ui.label(RichText::new("Tidal has no credits for this track.").color(SECONDARY));
-            }
-            for (role, names) in credits {
-                ui.label(RichText::new(role.to_uppercase()).font(semibold(11.0)).color(DIM));
-                ui.label(RichText::new(names).size(15.0).color(TEXT));
-                ui.add_space(10.0);
-            }
-        });
-        close
-    });
-    modal.inner || modal.should_close()
-}
-
 /// A Tidal web address for something, to share.
 pub fn link(item: &Item) -> String {
     match item {
+        Item::Track(id) => format!("https://tidal.com/browse/track/{id}"),
         Item::Album(id) => format!("https://tidal.com/browse/album/{id}"),
         Item::Artist(id) => format!("https://tidal.com/browse/artist/{id}"),
         Item::Playlist(id) => format!("https://tidal.com/browse/playlist/{id}"),
@@ -643,25 +502,16 @@ fn cell(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// How track rows behave: what is playing, which are favorites, and whether this list is the queue.
+/// How track rows behave: what is playing, what is saved, and whether this list is the queue or
+/// one of the user's playlists (by id), whose tracks can be removed and rearranged.
 pub struct Rows<'a> {
     pub playing: Option<u64>,
-    pub favorites: &'a HashSet<u64>,
-    pub playlists: &'a [Playlist],
-    pub saved: &'a HashSet<Item>,
-    /// Top-level folders and playlists, to move a playlist into.
-    pub folders: &'a [Card],
-    /// The id of the user's own playlist these rows are, whose tracks can be removed.
+    pub library: &'a Library,
     pub editing: Option<&'a str>,
     pub queue: bool,
 }
 
 impl Rows<'_> {
-    /// Whether the user made this playlist (and so can change it).
-    fn mine(&self, id: &str) -> bool {
-        self.playlists.iter().any(|p| p.id == id)
-    }
-
     /// A table of tracks under column headers, clickable to sort when `sorted` is set (sort, reversed).
     /// Click a title or a hovered number, or double-click a row, to play the list from there;
     /// right-click a row for more. Lists that span albums show each track's cover.
@@ -698,7 +548,7 @@ impl Rows<'_> {
                     continue;
                 }
                 let i = order.map_or(pos, |o| o[pos]);
-                let play = || if self.queue { Action::Jump(i) } else { Action::PlayTracks(in_order(tracks, order), pos) };
+                let play = || if self.queue { Action::Jump(i) } else { Action::PlayTracks(in_order(tracks, order), pos, false) };
                 let row = ui.interact(rect, ui.id().with(("row", pos)), if reorder.is_some() { Sense::click_and_drag() } else { Sense::click() });
                 if let Some(playlist) = reorder {
                     self.drag_row(ui, row.clone(), rect, playlist, pos, actions);
@@ -743,7 +593,7 @@ impl Rows<'_> {
                     cell(ui, TIME, height, |ui| {
                         ui.label(RichText::new(clock(f64::from(t.duration))).color(SECONDARY));
                     });
-                    heart(ui, t.id, self.favorites, hovered, actions);
+                    heart(ui, t.id, self.library, hovered, actions);
                 });
                 if row.double_clicked() {
                     actions.push(play());
@@ -753,7 +603,6 @@ impl Rows<'_> {
         });
     }
 
-    /// A track's right-click menu, laid out like Tidal's: the track, then what to do with it.
     /// Dragging a row of the user's playlist: a line shows where it will land, and letting go
     /// there moves it.
     fn drag_row(&self, ui: &Ui, row: Response, rect: Rect, playlist: &str, pos: usize, actions: &mut Vec<Action>) {
@@ -761,7 +610,6 @@ impl Rows<'_> {
             egui::DragAndDrop::set_payload(ui.ctx(), DraggedRow(pos));
         }
         let (Some(dragged), Some(at)) = (egui::DragAndDrop::payload::<DraggedRow>(ui.ctx()), ui.ctx().pointer_interact_pos()) else { return };
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         if !rect.contains(at) {
             return;
         }
@@ -775,10 +623,10 @@ impl Rows<'_> {
         }
     }
 
+    /// A track's right-click menu, laid out like Tidal's: the track, then what to do with it.
     fn menu(&self, ui: &mut Ui, tracks: &[Track], i: usize, actions: &mut Vec<Action>) {
         let t = &tracks[i];
         ui.set_min_width(240.0);
-        ui.spacing_mut().button_padding = vec2(12.0, 7.0);
         ui.horizontal(|ui| {
             picture(ui, art(t.cover.as_deref(), 80), 40.0, false);
             ui.vertical(|ui| {
@@ -787,12 +635,7 @@ impl Rows<'_> {
             });
         });
         ui.separator();
-        let item = |ui: &mut Ui, actions: &mut Vec<Action>, text: &str, action: Action| {
-            if ui.button(text).clicked() {
-                actions.push(action);
-                ui.close();
-            }
-        };
+        let item = menu_item;
         if self.queue {
             if i > 0 {
                 item(ui, actions, "Move up", Action::Move(i, i - 1));
@@ -812,12 +655,12 @@ impl Rows<'_> {
         }
         let config = egui::containers::menu::MenuConfig::new().close_behavior(KEEP_OPEN);
         egui::containers::menu::SubMenuButton::new("Add to playlist").config(config).ui(ui, |ui| self.add_to_playlist(ui, t.id, actions));
-        let saved = self.favorites.contains(&t.id);
+        let saved = self.library.saved.contains(&Item::Track(t.id));
         let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
-        item(ui, actions, collection, Action::Favorite(t.id, !saved));
+        item(ui, actions, collection, Action::Save(Item::Track(t.id), !saved));
         item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
         item(ui, actions, "Credits", Action::Credits(t.id, t.title.clone()));
-        item(ui, actions, "Copy link", Action::CopyLink(format!("https://tidal.com/browse/track/{}", t.id)));
+        item(ui, actions, "Copy link", Action::CopyLink(link(&Item::Track(t.id))));
         if let Some(id) = t.album_id {
             item(ui, actions, "Go to album", Action::Open(Source::Album(id)));
         }
@@ -829,10 +672,9 @@ impl Rows<'_> {
     /// The "Add to playlist" submenu: make a new one, or pick from the recent ones or any by name.
     fn add_to_playlist(&self, ui: &mut Ui, track: u64, actions: &mut Vec<Action>) {
         ui.set_min_width(240.0);
-        ui.spacing_mut().button_padding = vec2(12.0, 7.0);
         let filter_id = egui::Id::new("playlist filter");
         if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
-            actions.push(Action::PlaylistForm(Target::Create(Some(track)), String::new()));
+            actions.push(dialogs::form(Target::Create(Some(track)), ""));
             ui.close();
         }
         ui.separator();
@@ -842,11 +684,8 @@ impl Rows<'_> {
         ui.label(RichText::new(if needle.is_empty() { "RECENT" } else { "MATCHING" }).font(semibold(11.0)).color(DIM));
         let shown = if needle.is_empty() { 10 } else { usize::MAX };
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-            for p in self.playlists.iter().filter(|p| p.title.to_lowercase().contains(&needle)).take(shown) {
-                if ui.button(&p.title).clicked() {
-                    actions.push(Action::AddToPlaylist(p.id.clone(), track));
-                    ui.close();
-                }
+            for p in self.library.playlists.iter().filter(|p| p.title.to_lowercase().contains(&needle)).take(shown) {
+                menu_item(ui, actions, &p.title, Action::AddToPlaylist(p.id.clone(), track));
             }
         });
         ui.data_mut(|d| d.insert_temp(filter_id, filter));

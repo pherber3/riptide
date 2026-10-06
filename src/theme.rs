@@ -70,6 +70,12 @@ fastframe_icons::icons! {
     }
 }
 
+/// The app's logo at `size` pixels square, as RGBA: the window, taskbar and tray icon.
+pub fn logo(size: usize) -> Vec<u8> {
+    let image = image::load_from_memory(include_bytes!("../assets/riptide.png")).expect("bundled icon");
+    image.resize_exact(size as u32, size as u32, image::imageops::FilterType::Lanczos3).to_rgba8().into_raw()
+}
+
 /// The one dark look: near-black panels, borderless rounded widgets, Inter at real weights.
 pub fn install(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
@@ -103,7 +109,7 @@ pub fn install(ctx: &egui::Context) {
         }
         w.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
         s.spacing.item_spacing = vec2(8.0, 6.0);
-        s.spacing.button_padding = vec2(12.0, 6.0);
+        s.spacing.button_padding = vec2(12.0, 7.0);
         s.spacing.interact_size.y = 28.0;
         s.spacing.menu_margin = egui::Margin::same(6);
         // Floating bars, but with room kept for them so they never cover what is at the right edge.
