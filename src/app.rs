@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use crate::art::Art;
 use crate::cache;
 use crate::player::{Cmd, Event, Player};
-use crate::tidal::{self, Album, Artist, Card, Lyrics, Mix, Playlist, Quality, Results, Shelf, Tidal, Track};
+use crate::tidal::{self, Album, Artist, Card, Entry, Lyrics, Mix, Playlist, Quality, Results, Shelf, Tidal, Track};
 
 const ACCENT: Color32 = Color32::from_rgb(0x33, 0xff, 0xee);
 const GOLD: Color32 = Color32::from_rgb(0xf5, 0xc5, 0x42);
@@ -30,7 +30,8 @@ enum Page {
     Tracks(Vec<Track>),
     Albums(Vec<Album>),
     Artists(Vec<Artist>),
-    Playlists(Vec<Playlist>),
+    /// A playlist folder ("Playlists" is the top level) and what it holds.
+    Playlists(String, Vec<Entry>),
     Queue,
     Lyrics,
     Loading,
@@ -69,6 +70,7 @@ enum Action {
     Search,
     Home,
     Mix(Mix),
+    Folder(String, String),
     SearchPage,
     Album(u64),
     Artist(u64),
@@ -121,6 +123,8 @@ pub struct App {
     page: Page,
     back: Vec<Page>,
     view: View,
+    /// The sort each kind of list page was last left in.
+    sorts: HashMap<&'static str, (Sort, bool)>,
     query: String,
     queue: Vec<Track>,
     index: Option<usize>,
@@ -139,6 +143,20 @@ pub struct App {
 }
 
 impl App {
+    fn save_settings(&self) {
+        let mut text = format!("quality={}\nvolume={}\n", self.quality.name(), self.volume);
+        for (page, (sort, reversed)) in &self.sorts {
+            text += &format!("sort.{page}={sort:?}{}\n", if *reversed { " reversed" } else { "" });
+        }
+        let _ = std::fs::write(settings_path(&self.session), text);
+    }
+
+    /// A fresh filter for the current page, in the sort that kind of page was last left in.
+    fn reset_view(&mut self) {
+        let (sort, reverse) = page_key(&self.page).and_then(|k| self.sorts.get(k)).copied().unwrap_or_default();
+        self.view = View { sort, reverse, ..View::default() };
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, dir: &Path) -> Result<Self> {
         let ctx = cc.egui_ctx.clone();
         ctx.set_visuals(egui::Visuals::dark());
@@ -147,7 +165,14 @@ impl App {
         let cache = dir.join("cache");
         std::fs::create_dir_all(&cache)?;
         cache::evict(&cache, crate::CACHE_BYTES)?;
-        fastframe_fonts::FontSetup::default().install(&ctx);
+        fastframe_fonts::FontSetup::default().system_fallbacks(false).install(&ctx);
+        std::thread::spawn({
+            let ctx = ctx.clone();
+            move || {
+                ctx.set_fonts(fastframe_fonts::FontSetup::default().definitions());
+                ctx.request_repaint();
+            }
+        });
         egui_extras::install_image_loaders(&ctx);
         ctx.add_bytes_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
         let (tx, rx) = channel();
@@ -163,7 +188,7 @@ impl App {
             move || ctx.request_repaint()
         });
         let session = tidal::session_path(dir);
-        let (quality, volume) = load_settings(&session);
+        let (quality, volume, sorts) = load_settings(&session);
         player.status.set_volume(volume * volume);
         let app = Self {
             rt,
@@ -182,6 +207,7 @@ impl App {
             page: Page::Loading,
             back: Vec::new(),
             view: View::default(),
+            sorts,
             query: String::new(),
             queue: Vec::new(),
             index: None,
@@ -211,8 +237,8 @@ impl App {
     }
 
     fn show(&mut self, page: Page) {
-        self.view = View::default();
         let old = std::mem::replace(&mut self.page, page);
+        self.reset_view();
         if !matches!(old, Page::Loading) {
             self.back.push(old);
         }
@@ -316,11 +342,12 @@ impl App {
                     Library::Tracks => Page::Tracks(t.favorite_tracks().await?),
                     Library::Albums => Page::Albums(t.favorite_albums().await?),
                     Library::Artists => Page::Artists(t.favorite_artists().await?),
-                    Library::Playlists => Page::Playlists(t.playlists().await?),
+                    Library::Playlists => Page::Playlists("Playlists".into(), t.folder("root").await?),
                 })
             }),
             Action::Queue => self.show(Page::Queue),
             Action::Home => self.navigate(home_page(tidal)),
+            Action::Folder(id, name) => self.navigate(async move { Ok(Page::Playlists(name, tidal.lock().await.folder(&id).await?)) }),
             Action::Mix(mix) => self.navigate(async move {
                 let tracks = tidal.lock().await.mix_tracks(&mix.id).await?;
                 Ok(Page::Mix(mix, tracks))
@@ -340,6 +367,10 @@ impl App {
                 let view = &mut self.view;
                 view.reverse = view.sort == sort && !view.reverse;
                 (view.sort, view.stale) = (sort, true);
+                if let Some(key) = page_key(&self.page) {
+                    self.sorts.insert(key, (sort, self.view.reverse));
+                    self.save_settings();
+                }
             }
             // Back to the last search results rather than searching again.
             Action::SearchPage if !matches!(self.page, Page::Search(_)) => {
@@ -402,7 +433,7 @@ impl App {
             }
             Action::Quality(quality) => {
                 self.quality = quality;
-                save_settings(&self.session, quality, self.volume);
+                self.save_settings();
                 if let Some(i) = self.index {
                     self.resume_at = Some(self.player.status.position());
                     self.play(i);
@@ -410,7 +441,8 @@ impl App {
             }
             Action::Back => {
                 if let Some(page) = self.back.pop() {
-                    (self.page, self.view) = (page, View::default());
+                    self.page = page;
+                    self.reset_view();
                     self.ctx.forget_all_images();
                 }
             }
@@ -420,7 +452,10 @@ impl App {
     fn receive(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Page(page) => (self.page, self.view) = (page, View::default()),
+                Msg::Page(page) => {
+                    self.page = page;
+                    self.reset_view();
+                }
                 Msg::Ready(id, reader) if self.current().is_some_and(|t| t.id == id) => {
                     self.player.send(Cmd::Load(reader));
                     if let Some(seconds) = self.resume_at.take() {
@@ -567,12 +602,13 @@ impl App {
             item(ui, matches!(self.page, Page::Tracks(_)), "Tracks", Action::Library(Library::Tracks));
             item(ui, matches!(self.page, Page::Albums(_)), "Albums", Action::Library(Library::Albums));
             item(ui, matches!(self.page, Page::Artists(_)), "Artists", Action::Library(Library::Artists));
-            item(ui, matches!(self.page, Page::Playlists(_)), "Playlists", Action::Library(Library::Playlists));
+            item(ui, matches!(self.page, Page::Playlists(..)), "Playlists", Action::Library(Library::Playlists));
         });
     }
 
     fn player_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let status = self.player.status.clone();
+        let mut save = false;
         egui::Panel::bottom("player").exact_size(88.0).show(ui, |ui| {
             ui.columns(3, |cols| {
                 let track = self.index.and_then(|i| self.queue.get(i));
@@ -646,7 +682,7 @@ impl App {
                         status.set_volume(self.volume * self.volume);
                     }
                     if volume.drag_stopped() || (volume.changed() && !volume.dragged()) {
-                        save_settings(&self.session, self.quality, self.volume);
+                        save = true;
                     }
                     ui.label("🔊");
                     let on = matches!(self.page, Page::Lyrics);
@@ -668,6 +704,9 @@ impl App {
                 });
             });
         });
+        if save {
+            self.save_settings();
+        }
     }
 
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -676,7 +715,7 @@ impl App {
                 Page::Tracks(tracks) | Page::Playlist(_, tracks) => arrange(tracks, &self.view),
                 Page::Albums(albums) => arrange(albums, &self.view),
                 Page::Artists(artists) => arrange(artists, &self.view),
-                Page::Playlists(playlists) => arrange(playlists, &self.view),
+                Page::Playlists(_, entries) => arrange(entries, &self.view),
                 _ => Vec::new(),
             };
             (self.view.rows, self.view.stale) = (Some(rows), false);
@@ -762,9 +801,9 @@ impl App {
                     grid_controls(ui, "Artists", &mut self.view, &[Sort::Added, Sort::Title], actions);
                     artist_cards(ui, artists, self.view.rows.as_deref(), actions);
                 }
-                Page::Playlists(playlists) => {
-                    grid_controls(ui, "Playlists", &mut self.view, &[Sort::Added, Sort::Title], actions);
-                    playlist_cards(ui, playlists, self.view.rows.as_deref(), actions);
+                Page::Playlists(title, entries) => {
+                    grid_controls(ui, title, &mut self.view, &[Sort::Added, Sort::Title], actions);
+                    entry_cards(ui, entries, self.view.rows.as_deref(), actions);
                 }
                 Page::Lyrics => {
                     let position = self.player.status.position();
@@ -845,7 +884,7 @@ impl eframe::App for App {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Sort {
     #[default]
     Added,
@@ -857,6 +896,8 @@ enum Sort {
 }
 
 impl Sort {
+    const ALL: [Sort; 6] = [Sort::Added, Sort::Title, Sort::Artist, Sort::Album, Sort::Year, Sort::Duration];
+
     fn label(self, reverse: bool) -> &'static str {
         match (self, reverse) {
             (Sort::Added, false) => "Recently added",
@@ -962,14 +1003,49 @@ impl Sortable for Artist {
     }
 }
 
-impl Sortable for Playlist {
+impl Sortable for Entry {
     fn text(&self) -> String {
-        self.title.to_lowercase()
+        match self {
+            Entry::Folder { name, .. } => name.to_lowercase(),
+            Entry::Playlist(p) => p.title.to_lowercase(),
+        }
     }
 
+    /// Folders before playlists, then by name.
     fn key(&self, _: Sort) -> (u32, String) {
-        (0, self.title.to_lowercase())
+        (u32::from(matches!(self, Entry::Playlist(_))), self.text())
     }
+}
+
+/// Which remembered sort a page uses.
+fn page_key(page: &Page) -> Option<&'static str> {
+    match page {
+        Page::Tracks(_) => Some("tracks"),
+        Page::Albums(_) => Some("albums"),
+        Page::Artists(_) => Some("artists"),
+        Page::Playlists(..) => Some("playlists"),
+        Page::Playlist(..) => Some("playlist"),
+        _ => None,
+    }
+}
+
+fn entry_cards(ui: &mut Ui, entries: &[Entry], order: Option<&[usize]>, actions: &mut Vec<Action>) {
+    ui.horizontal_wrapped(|ui| {
+        for entry in ordered(entries, order) {
+            match entry {
+                Entry::Folder { id, name, count } => {
+                    if card(ui, None, false, &format!("📁 {name}"), &format!("Folder · {count} playlists")) {
+                        actions.push(Action::Folder(id.clone(), name.clone()));
+                    }
+                }
+                Entry::Playlist(p) => {
+                    if card(ui, art(p.cover.as_deref(), 320), false, &p.title, &format!("{} tracks", p.count)) {
+                        actions.push(Action::Playlist(p.id.clone()));
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn arrange<T: Sortable>(items: &[T], view: &View) -> Vec<usize> {
@@ -1015,16 +1091,27 @@ fn settings_path(session: &Path) -> PathBuf {
     session.with_file_name("settings.txt")
 }
 
-/// Quality and volume, one per line.
-fn load_settings(session: &Path) -> (Quality, f32) {
-    let text = std::fs::read_to_string(settings_path(session)).unwrap_or_default();
-    let mut lines = text.lines();
-    let quality = lines.next().and_then(Quality::parse).unwrap_or(Quality::Max);
-    (quality, lines.next().and_then(|v| v.parse().ok()).unwrap_or(1.0))
-}
+type Sorts = HashMap<&'static str, (Sort, bool)>;
 
-fn save_settings(session: &Path, quality: Quality, volume: f32) {
-    let _ = std::fs::write(settings_path(session), format!("{}\n{volume}\n", quality.name()));
+/// `key=value` lines: quality, volume and each page's sort (`sort.albums=Title reversed`).
+fn load_settings(session: &Path) -> (Quality, f32, Sorts) {
+    let text = std::fs::read_to_string(settings_path(session)).unwrap_or_default();
+    let (mut quality, mut volume, mut sorts) = (Quality::Max, 1.0, Sorts::new());
+    for (key, value) in text.lines().filter_map(|l| l.split_once('=')) {
+        match key {
+            "quality" => quality = Quality::parse(value).unwrap_or(quality),
+            "volume" => volume = value.parse().unwrap_or(volume),
+            _ => {
+                let page = ["tracks", "albums", "artists", "playlists", "playlist"].into_iter().find(|p| key == format!("sort.{p}"));
+                let (name, reversed) = value.split_once(' ').map_or((value, false), |(n, r)| (n, r == "reversed"));
+                let sort = Sort::ALL.into_iter().find(|s| format!("{s:?}") == name);
+                if let (Some(page), Some(sort)) = (page, sort) {
+                    sorts.insert(page, (sort, reversed));
+                }
+            }
+        }
+    }
+    (quality, volume, sorts)
 }
 
 fn clock(seconds: f64) -> String {
@@ -1126,7 +1213,7 @@ async fn home_page(tidal: Arc<Mutex<Tidal>>) -> Result<Page> {
     let mut tidal = tidal.lock().await;
     match tidal.home().await {
         Ok(shelves) if !shelves.is_empty() => Ok(Page::Home(shelves)),
-        _ => Ok(Page::Playlists(tidal.playlists().await?)),
+        _ => Ok(Page::Playlists("Playlists".into(), tidal.folder("root").await?)),
     }
 }
 

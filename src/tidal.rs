@@ -114,6 +114,13 @@ pub enum Card {
     Mix(Mix),
 }
 
+/// What a playlist folder holds.
+#[derive(Clone, Debug)]
+pub enum Entry {
+    Folder { id: String, name: String, count: u64 },
+    Playlist(Playlist),
+}
+
 /// One row of the home page.
 #[derive(Clone, Debug)]
 pub struct Shelf {
@@ -206,6 +213,23 @@ impl Tidal {
             req = req.form(form);
         }
         Ok(req.send().await?.error_for_status()?)
+    }
+
+    /// A GET against Tidal's v2 API.
+    async fn get_v2(&mut self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        self.refresh().await?;
+        let token = self.client.session.auth.access_token.clone().context("not signed in")?;
+        let country = self.client.user_info.as_ref().map_or("US".into(), |u| u.country_code.clone());
+        let resp = self
+            .http
+            .get(format!("https://api.tidal.com/v2/{path}"))
+            .header("x-tidal-client-version", "2026.1.5")
+            .bearer_auth(token)
+            .query(&[("countryCode", country.as_str()), ("locale", "en_US"), ("deviceType", "BROWSER")])
+            .query(query)
+            .send()
+            .await?;
+        Ok(resp.error_for_status()?.json().await?)
     }
 
     async fn get(&mut self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
@@ -343,11 +367,30 @@ impl Tidal {
         Ok(self.favorites("artists").await?.iter().filter_map(|v| artist(&v["item"])).collect())
     }
 
-    /// Your own playlists and the ones you follow, newest first.
-    pub async fn playlists(&mut self) -> Result<Vec<Playlist>> {
-        let path = format!("users/{}/playlistsAndFavoritePlaylists", self.user()?);
-        let items = self.items(&path, &[("order", "DATE"), ("orderDirection", "DESC")], 1000).await?;
-        Ok(items.iter().filter_map(|v| playlist(&v["playlist"])).collect())
+    /// A playlist folder's folders and playlists, newest first; "root" is the top level.
+    pub async fn folder(&mut self, id: &str) -> Result<Vec<Entry>> {
+        let (mut entries, mut seen) = (Vec::new(), 0);
+        loop {
+            let offset = seen.to_string();
+            let query = [("folderId", id), ("includeOnly", ""), ("limit", "50"), ("offset", &offset), ("order", "DATE"), ("orderDirection", "DESC")];
+            let page = self.get_v2("my-collection/playlists/folders", &query).await?;
+            let items = page["items"].as_array().cloned().unwrap_or_default();
+            seen += items.len();
+            for item in &items {
+                match item["itemType"].as_str() {
+                    Some("FOLDER") => entries.push(Entry::Folder {
+                        id: text(&item["data"]["id"]),
+                        name: text(&item["name"]),
+                        count: item["data"]["totalNumberOfItems"].as_u64().unwrap_or(0),
+                    }),
+                    Some("PLAYLIST") => entries.extend(playlist(&item["data"]).map(Entry::Playlist)),
+                    _ => {}
+                }
+            }
+            if items.is_empty() || seen >= page["totalNumberOfItems"].as_u64().unwrap_or(0) as usize {
+                return Ok(entries);
+            }
+        }
     }
 
     pub async fn favorite_ids(&mut self) -> Result<HashSet<u64>> {
