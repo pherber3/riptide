@@ -7,13 +7,19 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 tidlers = "0.5"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-reqwest = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+reqwest = { version = "0.13", features = ["json", "query"] }
+serde_json = "1"
 open = "5"
 symphonia = { version = "0.5", default-features = false, features = ["flac", "isomp4", "aac"] }
 rubato = "0.16"
 rtrb = "0.3"
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.36"
+egui_extras = { version = "0.36", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 
 [profile.dev.package."*"]
 opt-level = 2
@@ -22,3 +28,17 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Spotifast's egui/winit forks (shared across crmne's apps): egui 0.36.1 plus fixes,
+# notably egui's idle busy-loop fix (emilk/egui#8398). Drop once upstream releases them.
+[patch.crates-io]
+ecolor = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+eframe = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }

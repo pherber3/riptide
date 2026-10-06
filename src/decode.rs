@@ -1,15 +1,15 @@
 use std::io;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rubato::{FftFixedIn, Resampler as _};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 
 use crate::cache::Reader;
 
@@ -18,7 +18,6 @@ pub struct Info {
     pub channels: usize,
     pub bits: Option<u32>,
     pub codec: &'static str,
-    pub duration: Option<Duration>,
 }
 
 pub struct Decoder {
@@ -41,14 +40,17 @@ impl Decoder {
             channels: p.channels.map_or(2, |c| c.count()),
             bits: p.bits_per_sample,
             codec: symphonia::default::get_codecs().get_codec(p.codec).map_or("?", |c| c.short_name),
-            duration: p.n_frames.filter(|&n| n > 0).zip(p.time_base).map(|(n, tb)| {
-                let t = tb.calc_time(n);
-                Duration::from_secs_f64(t.seconds as f64 + t.frac)
-            }),
         };
         let decoder = symphonia::default::get_codecs().make(p, &DecoderOptions::default())?;
         let track = track.id;
         Ok(Self { format, decoder, track, info })
+    }
+
+    pub fn seek(&mut self, seconds: f64) -> Result<()> {
+        let to = SeekTo::Time { time: Time::from(seconds), track_id: Some(self.track) };
+        self.format.seek(SeekMode::Coarse, to)?;
+        self.decoder.reset();
+        Ok(())
     }
 
     /// Decodes the next packet into `out` as interleaved samples; false at the end.

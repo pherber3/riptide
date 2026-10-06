@@ -1,9 +1,15 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::collections::HashMap;
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
-use crate::tidal::Parts;
+use anyhow::Result;
+
+use crate::tidal::{Parts, Quality, Tidal};
+
+/// Downloads in progress, so a second reader (prefetch, then play) shares the first download.
+static ACTIVE: LazyLock<Mutex<HashMap<PathBuf, Shared>>> = LazyLock::new(Default::default);
 
 #[derive(Default)]
 struct Progress {
@@ -17,7 +23,7 @@ type Shared = Arc<(Mutex<Progress>, Condvar)>;
 pub struct Writer {
     file: File,
     shared: Shared,
-    marker: PathBuf,
+    path: PathBuf,
     held: Option<u64>,
 }
 
@@ -37,10 +43,15 @@ pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
     let file = File::create(path)?;
     let shared = Shared::default();
     let reader = Reader { file: File::open(path)?, pos: 0, shared: shared.clone() };
-    Ok((Writer { file, shared, marker: marker(path), held: None }, reader))
+    ACTIVE.lock().unwrap().insert(path.into(), shared.clone());
+    Ok((Writer { file, shared, path: path.into(), held: None }, reader))
 }
 
-pub fn open_complete(path: &Path) -> Option<Reader> {
+/// A reader for a finished or in-progress download.
+pub fn open(path: &Path) -> Option<Reader> {
+    if let Some(shared) = ACTIVE.lock().unwrap().get(path) {
+        return Some(Reader { file: File::open(path).ok()?, pos: 0, shared: shared.clone() });
+    }
     if !marker(path).exists() {
         return None;
     }
@@ -70,7 +81,7 @@ impl Writer {
 
     pub fn finish(self, result: Result<(), String>) {
         let result = result.and_then(|()| {
-            self.file.sync_all().and_then(|()| File::create(&self.marker).map(drop)).map_err(|e| e.to_string())
+            self.file.sync_all().and_then(|()| File::create(marker(&self.path)).map(drop)).map_err(|e| e.to_string())
         });
         let (lock, cv) = &*self.shared;
         let mut p = lock.lock().unwrap();
@@ -78,7 +89,22 @@ impl Writer {
         p.done = true;
         p.failed = result.err();
         cv.notify_all();
+        drop(p);
+        ACTIVE.lock().unwrap().remove(&self.path);
     }
+}
+
+/// A reader for a track, downloading it into the cache unless it is already there or on its way.
+pub async fn track(tidal: &tokio::sync::Mutex<Tidal>, dir: &Path, id: u64, quality: Quality) -> Result<Reader> {
+    let path = dir.join(format!("{id}-{quality:?}"));
+    let mut tidal = tidal.lock().await;
+    if let Some(reader) = open(&path) {
+        return Ok(reader);
+    }
+    let stream = tidal.stream(id, quality).await?;
+    let (writer, reader) = create(&path)?;
+    tokio::spawn(async move { fetch(&reqwest::Client::new(), &stream.parts, writer).await });
+    Ok(reader)
 }
 
 impl Reader {
@@ -137,7 +163,7 @@ impl symphonia::core::io::MediaSource for Reader {
     }
 }
 
-pub async fn fetch(http: &reqwest::Client, parts: &Parts, mut writer: Writer) {
+async fn fetch(http: &reqwest::Client, parts: &Parts, mut writer: Writer) {
     let result = fetch_into(http, parts, &mut writer).await;
     writer.finish(result.map_err(|e| e.to_string()));
 }
