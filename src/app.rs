@@ -259,6 +259,10 @@ pub enum Action {
     /// Move a playlist into a folder (by id; ROOT is the top level).
     MovePlaylist(String, String),
     DeletePlaylist(String),
+    /// Move a track of the user's playlist from one position to another.
+    MoveInPlaylist(String, usize, usize),
+    RenameFolder(String, String),
+    DeleteFolder(String),
     DisconnectLastFm,
     /// Play through this output device, or the system default.
     Device(Option<String>),
@@ -575,6 +579,14 @@ impl App {
         let PlaylistForm { target, title, description, public } = form;
         match target {
             Target::Rename(id) => self.apply(Action::RenamePlaylist(id, title.trim().into())),
+            Target::RenameFolder(id) => self.apply(Action::RenameFolder(id, title.trim().into())),
+            Target::CreateFolder => {
+                let Some(tidal) = self.tidal.clone() else { return };
+                self.spawn(async move {
+                    tidal.create_folder(title.trim()).await?;
+                    Ok(Msg::Folders(tidal.folder(ROOT).await?))
+                });
+            }
             Target::Create(track) => {
                 let Some(tidal) = self.tidal.clone() else { return };
                 self.spawn(async move {
@@ -783,7 +795,38 @@ impl App {
                 });
             }
             Action::MovePlaylist(id, folder) => self.spawn(async move {
-                tidal.arrange("move", &id, Some(&folder)).await?;
+                tidal.arrange("move", &format!("playlist:{id}"), Some(&folder)).await?;
+                Ok(Msg::Folders(tidal.folder(ROOT).await?))
+            }),
+            Action::MoveInPlaylist(id, from, to) => {
+                if let Some(Page { source: Source::Playlist(open), body: Body::Tracks { tracks, .. }, .. }) = &mut self.page
+                    && *open == id
+                    && from < tracks.len()
+                    && to < tracks.len()
+                {
+                    let track = tracks.remove(from);
+                    tracks.insert(to, track);
+                }
+                self.spawn(async move {
+                    tidal.move_in_playlist(&id, from, to).await?;
+                    Ok(Msg::Done)
+                });
+            }
+            Action::RenameFolder(id, name) => {
+                for card in &mut self.folders {
+                    if let Card::Folder { id: folder, name: old, .. } = card
+                        && *folder == id
+                    {
+                        *old = name.clone();
+                    }
+                }
+                self.spawn(async move {
+                    tidal.rename_folder(&id, &name).await?;
+                    Ok(Msg::Folders(tidal.folder(ROOT).await?))
+                });
+            }
+            Action::DeleteFolder(id) => self.spawn(async move {
+                tidal.delete_folder(&id).await?;
                 Ok(Msg::Folders(tidal.folder(ROOT).await?))
             }),
             Action::DeletePlaylist(id) => {
@@ -793,7 +836,7 @@ impl App {
                     self.step(true);
                 }
                 self.spawn(async move {
-                    tidal.arrange("remove", &id, None).await?;
+                    tidal.arrange("remove", &format!("playlist:{id}"), None).await?;
                     Ok(Msg::Notice("Playlist deleted".into()))
                 });
             }
@@ -1025,9 +1068,14 @@ impl App {
                 ui.add_space(10.0);
                 ui.label(RichText::new("PLAYLISTS").font(semibold(11.0)).color(DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, Icon::Plus, 16.0, SECONDARY).on_hover_text("Create playlist").clicked() {
-                        actions.push(Action::PlaylistForm(Target::Create(None), String::new()));
-                    }
+                    let plus = egui::Button::image(Icon::Plus.image(SECONDARY, 16.0)).frame(false);
+                    egui::containers::menu::MenuButton::from_button(plus).ui(ui, |ui| {
+                        for (text, target) in [("New playlist", Target::Create(None)), ("New folder", Target::CreateFolder)] {
+                            if ui.button(text).clicked() {
+                                actions.push(Action::PlaylistForm(target, String::new()));
+                            }
+                        }
+                    });
                 });
             });
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1048,6 +1096,21 @@ impl App {
                                 actions.push(Action::MovePlaylist(dragged.0.clone(), id.clone()));
                             }
                             response = response.on_hover_text(format!("{count} playlists"));
+                            response.context_menu(|ui| {
+                                ui.spacing_mut().button_padding = vec2(12.0, 7.0);
+                                if ui.button("Rename").clicked() {
+                                    let name = text.to_string();
+                                    actions.push(Action::PlaylistForm(Target::RenameFolder(id.clone()), name));
+                                    ui.close();
+                                }
+                                ui.menu_button("Delete folder", |ui| {
+                                    ui.label(RichText::new("Its playlists move to the top level.").color(SECONDARY));
+                                    if ui.button(RichText::new("Delete").color(DANGER)).clicked() {
+                                        actions.push(Action::DeleteFolder(id.clone()));
+                                        ui.close();
+                                    }
+                                });
+                            });
                         }
                         Card::Playlist(p) => {
                             if response.drag_started() {

@@ -597,12 +597,40 @@ impl Tidal {
     }
 
     /// Changes the user's playlist folders: `remove` (a playlist the user made is deleted) or
-    /// `move` into a folder ("root" is the top level).
-    pub async fn arrange(&self, action: &str, playlist: &str, folder: Option<&str>) -> Result<()> {
-        let (url, trn) = (format!("{V2}/my-collection/playlists/folders/{action}"), format!("trn:playlist:{playlist}"));
+    /// `move` into a folder ("root" is the top level). `item` is `playlist:<id>` or `folder:<id>`.
+    pub async fn arrange(&self, action: &str, item: &str, folder: Option<&str>) -> Result<()> {
+        let (url, trn) = (format!("{V2}/my-collection/playlists/folders/{action}"), format!("trn:{item}"));
         let mut query = vec![("trns", trn.as_str())];
         query.extend(folder.map(|f| ("folderId", f)));
         self.send(Method::PUT, &url, &query, &[]).await.map(drop)
+    }
+
+    /// Moves the track at `from` so it ends up at `to` (positions in the playlist's own order).
+    pub async fn move_in_playlist(&self, playlist: &str, from: usize, to: usize) -> Result<()> {
+        self.edit(playlist, Method::POST, &format!("/items/{from}"), &[], &[("toIndex", to.to_string())]).await
+    }
+
+    pub async fn create_folder(&self, name: &str) -> Result<()> {
+        let url = format!("{V2}/my-collection/playlists/folders/create-folder");
+        self.send(Method::PUT, &url, &[("name", name), ("folderId", "root")], &[]).await.map(drop)
+    }
+
+    pub async fn rename_folder(&self, id: &str, name: &str) -> Result<()> {
+        let (url, trn) = (format!("{V2}/my-collection/playlists/folders/rename"), format!("trn:folder:{id}"));
+        self.send(Method::PUT, &url, &[("trn", trn.as_str()), ("name", name)], &[]).await.map(drop)
+    }
+
+    /// Deletes a folder, first moving what is in it to the top level so no playlist goes with it.
+    pub async fn delete_folder(&self, id: &str) -> Result<()> {
+        for card in self.folder(id).await? {
+            let item = match card {
+                Card::Playlist(p) => format!("playlist:{}", p.id),
+                Card::Folder { id, .. } => format!("folder:{id}"),
+                _ => continue,
+            };
+            self.arrange("move", &item, Some("root")).await?;
+        }
+        self.arrange("remove", &format!("folder:{id}"), None).await
     }
 
     /// Saved track ids, and saved albums, artists and playlists.

@@ -12,6 +12,9 @@ const NUMBER: f32 = 36.0;
 const TIME: f32 = 56.0;
 const HEART: f32 = 32.0;
 const THUMB: f32 = 38.0;
+
+/// A playlist row being dragged to a new place, by position.
+struct DraggedRow(usize);
 /// Menus that hold a text field: a click inside (in the field) mustn't close them.
 const KEEP_OPEN: egui::PopupCloseBehavior = egui::PopupCloseBehavior::CloseOnClickOutside;
 
@@ -352,6 +355,8 @@ pub fn switch(ui: &mut Ui, on: bool) -> egui::Response {
 pub enum Target {
     Create(Option<u64>),
     Rename(String),
+    CreateFolder,
+    RenameFolder(String),
 }
 
 pub struct PlaylistForm {
@@ -365,12 +370,18 @@ pub struct PlaylistForm {
 /// Some(false) when closed.
 pub fn playlist_dialog(ctx: &egui::Context, form: &mut PlaylistForm) -> Option<bool> {
     let creating = matches!(form.target, Target::Create(_));
+    let heading = match form.target {
+        Target::Create(_) => "Create playlist",
+        Target::Rename(_) => "Rename playlist",
+        Target::CreateFolder => "Create folder",
+        Target::RenameFolder(_) => "Rename folder",
+    };
     let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
     let modal = egui::Modal::new(egui::Id::new("playlist dialog")).frame(frame).show(ctx, |ui| {
         ui.set_width(460.0);
         let mut close = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(if creating { "Create playlist" } else { "Rename playlist" }).font(bold(22.0)).color(TEXT));
+            ui.label(RichText::new(heading).font(bold(22.0)).color(TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| close = icon_button(ui, Icon::Close, 18.0, SECONDARY).clicked());
         });
         ui.add_space(16.0);
@@ -609,6 +620,8 @@ impl Rows<'_> {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let height = if album { 52.0 } else { 40.0 };
+            // The user's own playlist, in its own order and unfiltered, can be rearranged by dragging.
+            let reorder = self.editing.filter(|_| sorted == Some((Sort::Added, false)) && order.is_none_or(|o| o.len() == tracks.len()));
             let added = tracks.first().is_some_and(|t| t.added.is_some());
             let columns = [(Sort::Title, "TITLE", 0.4, true), (Sort::Artist, "ARTIST", 0.25, true), (Sort::Album, "ALBUM", 0.22, album), (Sort::Added, "DATE ADDED", 0.13, added)];
             let columns: Vec<_> = columns.into_iter().filter(|c| c.3).collect();
@@ -637,7 +650,10 @@ impl Rows<'_> {
                 }
                 let i = order.map_or(pos, |o| o[pos]);
                 let play = || if self.queue { Action::Jump(i) } else { Action::PlayTracks(in_order(tracks, order), pos) };
-                let row = ui.interact(rect, ui.id().with(("row", pos)), Sense::click());
+                let row = ui.interact(rect, ui.id().with(("row", pos)), if reorder.is_some() { Sense::click_and_drag() } else { Sense::click() });
+                if let Some(playlist) = reorder {
+                    self.drag_row(ui, row.clone(), rect, playlist, pos, actions);
+                }
                 let hovered = ui.rect_contains_pointer(rect);
                 if hovered {
                     ui.painter().rect_filled(rect, 6.0, SURFACE);
@@ -689,6 +705,27 @@ impl Rows<'_> {
     }
 
     /// A track's right-click menu, laid out like Tidal's: the track, then what to do with it.
+    /// Dragging a row of the user's playlist: a line shows where it will land, and letting go
+    /// there moves it.
+    fn drag_row(&self, ui: &Ui, row: Response, rect: Rect, playlist: &str, pos: usize, actions: &mut Vec<Action>) {
+        if row.drag_started() {
+            egui::DragAndDrop::set_payload(ui.ctx(), DraggedRow(pos));
+        }
+        let (Some(dragged), Some(at)) = (egui::DragAndDrop::payload::<DraggedRow>(ui.ctx()), ui.ctx().pointer_interact_pos()) else { return };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if !rect.contains(at) {
+            return;
+        }
+        // The gap above or below this row, and where the dragged track ends up once taken out.
+        let gap = if at.y < rect.center().y { pos } else { pos + 1 };
+        let y = if gap == pos { rect.top() } else { rect.bottom() };
+        ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, ACCENT));
+        let to = if gap > dragged.0 { gap - 1 } else { gap };
+        if ui.input(|i| i.pointer.any_released()) && to != dragged.0 {
+            actions.push(Action::MoveInPlaylist(playlist.into(), dragged.0, to));
+        }
+    }
+
     fn menu(&self, ui: &mut Ui, tracks: &[Track], i: usize, actions: &mut Vec<Action>) {
         let t = &tracks[i];
         ui.set_min_width(240.0);
