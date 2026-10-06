@@ -163,7 +163,8 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             (Head::title("Artists"), Body::Grid { cards, sorts: NAME_SORTS })
         }
         Source::Folder(id, name) => (Head::title(name.clone()), Body::Grid { cards: tidal.folder(id).await?, sorts: NAME_SORTS }),
-        Source::Settings => (Head::title("Settings"), Body::Settings),
+        // The settings page draws its own title, centred with its cards.
+        Source::Settings => (None, Body::Settings),
         Source::Page(path) => {
             let (title, mut shelves) = tidal.page(path).await?;
             // A page of one list ("View all") shows as a grid or a track list under that list's name.

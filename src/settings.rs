@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use fastframe_theme::Catalog;
 
 use crate::app::Action;
-use crate::theme::{Palette, p, medium};
+use crate::theme::{Palette, bold, medium, p};
 use crate::tidal::Quality;
 use crate::view::Sort;
 use crate::widgets::{section, switch, tier_color};
@@ -54,9 +54,23 @@ impl Settings {
 /// The settings page: one card per section, a row per setting with its control on the right. It
 /// edits `s` directly; quality goes through an action, since it reloads the playing track.
 pub fn page(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, home: &Path, actions: &mut Vec<Action>) {
-    ui.set_max_width(760.0);
+    // One column down the middle of the page, however wide the window.
+    let width = ui.available_width().min(760.0);
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() - width) / 2.0);
+        ui.vertical(|ui| {
+            ui.set_width(width);
+            ui.add_space(12.0);
+            ui.label(RichText::new("Settings").font(bold(32.0)).color(p().text));
+            cards(ui, s, themes, lastfm_user, home, actions);
+            ui.add_space(24.0);
+        });
+    });
+}
+
+fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, home: &Path, actions: &mut Vec<Action>) {
     card(ui, "Appearance", |ui| {
-        row(ui, "Theme", "Themes are palette files: copy one in the themes folder and change its colours to make your own", |ui| {
+        row(ui, "Theme", "Copy a theme in its folder and edit the colours to make your own", |ui| {
             if ui.button("Open folder").clicked() {
                 let _ = open::that(home.join("data").join("themes"));
             }
@@ -138,7 +152,8 @@ fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 
 /// A setting: its name and a line about it on the left, its control on the right.
 fn row(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
-    egui::Sides::new().show(
+    // The words make room for the control: they wrap rather than run under it.
+    egui::Sides::new().shrink_left().show(
         ui,
         |ui| {
             ui.vertical(|ui| {
