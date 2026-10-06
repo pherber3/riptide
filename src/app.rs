@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::art::Art;
 use crate::cache;
+use crate::decode::Decoder;
 use crate::player::{Cmd, Event, Player};
 use crate::tidal::{self, Album, Artist, Card, Entry, Lyrics, Mix, Playlist, Quality, Results, Shelf, Tidal, Track};
 
@@ -30,8 +31,8 @@ enum Page {
     Tracks(Vec<Track>),
     Albums(Vec<Album>),
     Artists(Vec<Artist>),
-    /// A playlist folder ("Playlists" is the top level) and what it holds.
-    Playlists(String, Vec<Entry>),
+    /// A playlist folder (id, title; "root" is the top level) and what it holds.
+    Playlists(String, String, Vec<Entry>),
     Queue,
     Lyrics,
     Loading,
@@ -54,9 +55,10 @@ enum Repeat {
 
 enum Msg {
     Page(Page),
-    Ready(u64, cache::Reader),
+    Ready(u64, Box<Decoder>),
     SignedIn(Box<Tidal>),
     Favorites(HashSet<u64>),
+    Folders(Vec<Entry>),
     Done,
     Error(String),
     Radio(Vec<Track>),
@@ -132,6 +134,8 @@ pub struct App {
     unshuffled: Option<Vec<Track>>,
     repeat: Repeat,
     favorites: HashSet<u64>,
+    /// Top-level playlist folders and playlists, for the sidebar.
+    folders: Vec<Entry>,
     quality: Quality,
     volume: f32,
     dragging: Option<f64>,
@@ -214,6 +218,7 @@ impl App {
             unshuffled: None,
             repeat: Repeat::Off,
             favorites: HashSet::new(),
+            folders: Vec::new(),
             quality,
             volume,
             dragging: None,
@@ -260,12 +265,21 @@ impl App {
         self.error = None;
         let (dir, quality) = (self.cache.clone(), self.quality);
         let id = self.queue[index].id;
-        let (t, d) = (tidal.clone(), dir.clone());
-        self.spawn(async move { Ok(Msg::Ready(id, cache::track(&t, &d, id, quality).await?)) });
-        // Download the next track behind this one so it starts instantly.
-        if let Some(next) = self.queue.get(index + 1).map(|t| t.id) {
-            self.rt.spawn(async move { cache::track(&tidal, &dir, next, quality).await });
-        }
+        let next = self.queue.get(index + 1).map(|t| t.id);
+        self.spawn(async move {
+            let reader = cache::track(&tidal, &dir, id, quality).await?;
+            // Download the next track once this one is in, so it starts instantly without slowing this one.
+            if let Some(next) = next {
+                let download = reader.download();
+                tokio::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || download.wait()).await;
+                    cache::track(&tidal, &dir, next, quality).await
+                });
+            }
+            // Opening reads the stream's first bytes, so it happens here rather than on the audio thread.
+            let decoder = tokio::task::spawn_blocking(move || Decoder::open(reader)).await??;
+            Ok(Msg::Ready(id, Box::new(decoder)))
+        });
     }
 
     fn next(&mut self) {
@@ -342,12 +356,15 @@ impl App {
                     Library::Tracks => Page::Tracks(t.favorite_tracks().await?),
                     Library::Albums => Page::Albums(t.favorite_albums().await?),
                     Library::Artists => Page::Artists(t.favorite_artists().await?),
-                    Library::Playlists => Page::Playlists("Playlists".into(), t.folder("root").await?),
+                    Library::Playlists => Page::Playlists("root".into(), "Playlists".into(), t.folder("root").await?),
                 })
             }),
             Action::Queue => self.show(Page::Queue),
             Action::Home => self.navigate(home_page(tidal)),
-            Action::Folder(id, name) => self.navigate(async move { Ok(Page::Playlists(name, tidal.lock().await.folder(&id).await?)) }),
+            Action::Folder(id, name) => self.navigate(async move {
+                let entries = tidal.lock().await.folder(&id).await?;
+                Ok(Page::Playlists(id, name, entries))
+            }),
             Action::Mix(mix) => self.navigate(async move {
                 let tracks = tidal.lock().await.mix_tracks(&mix.id).await?;
                 Ok(Page::Mix(mix, tracks))
@@ -456,8 +473,8 @@ impl App {
                     self.page = page;
                     self.reset_view();
                 }
-                Msg::Ready(id, reader) if self.current().is_some_and(|t| t.id == id) => {
-                    self.player.send(Cmd::Load(reader));
+                Msg::Ready(id, decoder) if self.current().is_some_and(|t| t.id == id) => {
+                    self.player.send(Cmd::Load(decoder));
                     if let Some(seconds) = self.resume_at.take() {
                         self.player.send(Cmd::Seek(seconds));
                     }
@@ -488,8 +505,11 @@ impl App {
                     self.spawn(async move { Ok(Msg::Page(home_page(tidal).await?)) });
                     let tidal = self.tidal.clone().expect("just signed in");
                     self.spawn(async move { Ok(Msg::Favorites(tidal.lock().await.favorite_ids().await?)) });
+                    let tidal = self.tidal.clone().expect("just signed in");
+                    self.spawn(async move { Ok(Msg::Folders(tidal.lock().await.folder("root").await?)) });
                 }
                 Msg::Favorites(ids) => self.favorites = ids,
+                Msg::Folders(entries) => self.folders = entries,
                 Msg::Error(e) => {
                     if matches!(self.page, Page::Loading) {
                         self.page = self.back.pop().unwrap_or(Page::Search(Results::default()));
@@ -589,10 +609,12 @@ impl App {
         egui::Panel::left("nav").exact_size(180.0).show(ui, |ui| {
             ui.add_space(12.0);
             let mut item = |ui: &mut Ui, selected: bool, text: &str, action: Action| {
-                let label = RichText::new(text).size(15.0);
-                if ui.add_sized([ui.available_width(), 28.0], egui::Button::selectable(selected, label)).clicked() {
+                let button = egui::Button::selectable(selected, RichText::new(text).size(15.0)).truncate();
+                let response = ui.add_sized([ui.available_width(), 28.0], button);
+                if response.clicked() {
                     actions.push(action);
                 }
+                response
             };
             item(ui, matches!(self.page, Page::Home(_)), "Home", Action::Home);
             item(ui, matches!(self.page, Page::Search(_)), "Search", Action::SearchPage);
@@ -602,7 +624,25 @@ impl App {
             item(ui, matches!(self.page, Page::Tracks(_)), "Tracks", Action::Library(Library::Tracks));
             item(ui, matches!(self.page, Page::Albums(_)), "Albums", Action::Library(Library::Albums));
             item(ui, matches!(self.page, Page::Artists(_)), "Artists", Action::Library(Library::Artists));
-            item(ui, matches!(self.page, Page::Playlists(..)), "Playlists", Action::Library(Library::Playlists));
+            let root = matches!(&self.page, Page::Playlists(id, ..) if id == "root");
+            item(ui, root, "Playlists", Action::Library(Library::Playlists));
+            ui.add_space(16.0);
+            ui.label(RichText::new("PLAYLISTS").small().weak());
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                for entry in &self.folders {
+                    match entry {
+                        Entry::Folder { id, name, count } => {
+                            let open = matches!(&self.page, Page::Playlists(page, ..) if page == id);
+                            let response = item(ui, open, &format!("📁 {name}"), Action::Folder(id.clone(), name.clone()));
+                            response.on_hover_text(format!("{count} playlists"));
+                        }
+                        Entry::Playlist(p) => {
+                            let open = matches!(&self.page, Page::Playlist(page, _) if page.id == p.id);
+                            item(ui, open, &p.title, Action::Playlist(p.id.clone()));
+                        }
+                    }
+                }
+            });
         });
     }
 
@@ -715,7 +755,7 @@ impl App {
                 Page::Tracks(tracks) | Page::Playlist(_, tracks) => arrange(tracks, &self.view),
                 Page::Albums(albums) => arrange(albums, &self.view),
                 Page::Artists(artists) => arrange(artists, &self.view),
-                Page::Playlists(_, entries) => arrange(entries, &self.view),
+                Page::Playlists(_, _, entries) => arrange(entries, &self.view),
                 _ => Vec::new(),
             };
             (self.view.rows, self.view.stale) = (Some(rows), false);
@@ -801,7 +841,7 @@ impl App {
                     grid_controls(ui, "Artists", &mut self.view, &[Sort::Added, Sort::Title], actions);
                     artist_cards(ui, artists, self.view.rows.as_deref(), actions);
                 }
-                Page::Playlists(title, entries) => {
+                Page::Playlists(_, title, entries) => {
                     grid_controls(ui, title, &mut self.view, &[Sort::Added, Sort::Title], actions);
                     entry_cards(ui, entries, self.view.rows.as_deref(), actions);
                 }
@@ -1213,7 +1253,7 @@ async fn home_page(tidal: Arc<Mutex<Tidal>>) -> Result<Page> {
     let mut tidal = tidal.lock().await;
     match tidal.home().await {
         Ok(shelves) if !shelves.is_empty() => Ok(Page::Home(shelves)),
-        _ => Ok(Page::Playlists("Playlists".into(), tidal.folder("root").await?)),
+        _ => Ok(Page::Playlists("root".into(), "Playlists".into(), tidal.folder("root").await?)),
     }
 }
 

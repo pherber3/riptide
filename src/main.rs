@@ -57,7 +57,7 @@ fn main() -> Result<()> {
             let player = Player::start(move |e| {
                 let _ = tx.send(e);
             });
-            player.send(Cmd::Load(reader));
+            player.send(Cmd::Load(Box::new(decode::Decoder::open(reader)?)));
             loop {
                 match rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(Event::Ended) | Err(RecvTimeoutError::Disconnected) => break,

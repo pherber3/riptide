@@ -6,14 +6,15 @@ use std::time::Duration;
 use anyhow::Result;
 use fastframe_audio::{Buffer, BufferSize, Output, OutputOptions, Render};
 
-use crate::cache::Reader;
 use crate::decode::{Decoder, Resampler, map_channels};
 use crate::tidal::Quality;
 
 const RING: usize = 192_000 * 2;
 
+/// Commands for the audio thread. It never waits on the network: decoders arrive already opened,
+/// and a seek into a track still downloading is held until the download is done.
 pub enum Cmd {
-    Load(Reader),
+    Load(Box<Decoder>),
     Toggle,
     Seek(f64),
     Stop,
@@ -30,17 +31,27 @@ pub struct Status {
     pub volume: AtomicU32,
     played: AtomicU64,
     samples_per_second: AtomicU64,
+    /// A seek waiting for the download to finish, as f64 bits (NaN when none).
+    pending_seek: AtomicU64,
     /// The tier and format actually playing, which can be lower than the one asked for.
     pub format: Mutex<(Quality, String)>,
 }
 
 impl Status {
     pub fn position(&self) -> f64 {
+        let pending = f64::from_bits(self.pending_seek.load(Relaxed));
+        if !pending.is_nan() {
+            return pending;
+        }
         self.played.load(Relaxed) as f64 / self.samples_per_second.load(Relaxed).max(1) as f64
     }
 
     pub fn set_volume(&self, volume: f32) {
         self.volume.store(volume.to_bits(), Relaxed);
+    }
+
+    fn set_pending_seek(&self, seconds: Option<f64>) {
+        self.pending_seek.store(seconds.unwrap_or(f64::NAN).to_bits(), Relaxed);
     }
 }
 
@@ -57,6 +68,7 @@ impl Player {
             volume: AtomicU32::new(1.0f32.to_bits()),
             played: AtomicU64::new(0),
             samples_per_second: AtomicU64::new(1),
+            pending_seek: AtomicU64::new(f64::NAN.to_bits()),
             format: Mutex::new((Quality::Max, String::new())),
         });
         let shared = status.clone();
@@ -98,7 +110,7 @@ impl Render for Sink {
 }
 
 struct Track {
-    decoder: Decoder,
+    decoder: Box<Decoder>,
     resampler: Resampler,
     tx: rtrb::Producer<f32>,
     packet: Vec<f32>,
@@ -106,6 +118,7 @@ struct Track {
     ready: Vec<f32>,
     sent: usize,
     ended: bool,
+    pending_seek: Option<f64>,
 }
 
 fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) -> Result<()> {
@@ -125,29 +138,49 @@ fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) ->
         status.played.store((seconds * f64::from(rate)) as u64 * channels as u64, Relaxed);
         tx
     };
+    let seek = |t: &mut Track, seconds: f64| -> Result<()> {
+        if let Err(e) = t.decoder.seek(seconds) {
+            events(Event::Error(format!("seek failed: {e:#}")));
+        }
+        t.resampler = Resampler::new(t.decoder.info.sample_rate, rate, channels)?;
+        (t.tx, t.sent, t.ended, t.pending_seek) = (ring(seconds), 0, false, None);
+        t.ready.clear();
+        status.set_pending_seek(None);
+        Ok(())
+    };
     let mut track: Option<Track> = None;
     loop {
         let playing = track.is_some() && status.playing.load(Relaxed);
-        match rx.recv_timeout(Duration::from_millis(if playing { 10 } else { 1000 })) {
-            Ok(Cmd::Load(reader)) => match Decoder::open(reader) {
-                Ok(decoder) => {
-                    let i = &decoder.info;
-                    let bits = i.bits.map_or(String::new(), |b| format!("{b}-bit "));
-                    let tier = match (i.codec, i.bits, i.sample_rate) {
-                        ("flac", Some(16), ..=48_000) => Quality::High,
-                        ("flac", ..) => Quality::Max,
-                        _ => Quality::Low,
-                    };
-                    let format = format!("{} {bits}{:.1} kHz", i.codec.to_uppercase(), i.sample_rate as f32 / 1000.0);
-                    *status.format.lock().unwrap() = (tier, format);
-                    let resampler = Resampler::new(i.sample_rate, rate, channels)?;
-                    let empty = Vec::new;
-                    track = Some(Track { decoder, resampler, tx: ring(0.0), packet: empty(), mapped: empty(), ready: empty(), sent: 0, ended: false });
-                    status.playing.store(true, Relaxed);
-                    output.resume();
-                }
-                Err(e) => events(Event::Error(format!("can't play this track: {e:#}"))),
-            },
+        let waiting = track.as_ref().is_some_and(|t| t.pending_seek.is_some());
+        let timeout = if playing || waiting { 10 } else { 1000 };
+        match rx.recv_timeout(Duration::from_millis(timeout)) {
+            Ok(Cmd::Load(decoder)) => {
+                let i = &decoder.info;
+                let bits = i.bits.map_or(String::new(), |b| format!("{b}-bit "));
+                let tier = match (i.codec, i.bits, i.sample_rate) {
+                    ("flac", Some(16), ..=48_000) => Quality::High,
+                    ("flac", ..) => Quality::Max,
+                    _ => Quality::Low,
+                };
+                let format = format!("{} {bits}{:.1} kHz", i.codec.to_uppercase(), i.sample_rate as f32 / 1000.0);
+                *status.format.lock().unwrap() = (tier, format);
+                let resampler = Resampler::new(i.sample_rate, rate, channels)?;
+                let empty = Vec::new;
+                track = Some(Track {
+                    decoder,
+                    resampler,
+                    tx: ring(0.0),
+                    packet: empty(),
+                    mapped: empty(),
+                    ready: empty(),
+                    sent: 0,
+                    ended: false,
+                    pending_seek: None,
+                });
+                status.set_pending_seek(None);
+                status.playing.store(true, Relaxed);
+                output.resume();
+            }
             Ok(Cmd::Toggle) if track.is_some() => {
                 let play = !status.playing.load(Relaxed);
                 status.playing.store(play, Relaxed);
@@ -155,17 +188,18 @@ fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) ->
             }
             Ok(Cmd::Seek(seconds)) => {
                 if let Some(t) = &mut track {
-                    if let Err(e) = t.decoder.seek(seconds) {
-                        events(Event::Error(format!("seek failed: {e:#}")));
+                    if t.decoder.can_seek() {
+                        seek(t, seconds)?;
+                    } else {
+                        t.pending_seek = Some(seconds);
+                        status.set_pending_seek(Some(seconds));
                     }
-                    t.resampler = Resampler::new(t.decoder.info.sample_rate, rate, channels)?;
-                    (t.tx, t.sent, t.ended) = (ring(seconds), 0, false);
-                    t.ready.clear();
                 }
             }
             Ok(Cmd::Stop) => {
                 track = None;
                 status.playing.store(false, Relaxed);
+                status.set_pending_seek(None);
                 ring(0.0);
                 output.pause();
             }
@@ -173,6 +207,12 @@ fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) ->
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
         output.maintain();
+        if let Some(t) = &mut track
+            && let Some(seconds) = t.pending_seek
+            && t.decoder.can_seek()
+        {
+            seek(t, seconds)?;
+        }
         let Some(t) = track.as_mut().filter(|_| status.playing.load(Relaxed)) else { continue };
         if let Err(e) = fill(t, channels) {
             events(Event::Error(format!("playback stopped: {e:#}")));

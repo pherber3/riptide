@@ -4,9 +4,21 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
+use std::time::Duration;
+
 use anyhow::Result;
+use futures_util::{StreamExt, stream};
 
 use crate::tidal::{Parts, Quality, Tidal};
+
+/// Hi-res segments fetched at once; more barely helps and just competes with everything else.
+const PARALLEL: usize = 4;
+
+/// One client for all audio, so connections are reused; timeouts turn a stalled network into an error.
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(20));
+    builder.build().expect("HTTP client")
+});
 
 /// Downloads in progress, so a second reader (prefetch, then play) shares the first download.
 static ACTIVE: LazyLock<Mutex<HashMap<PathBuf, Shared>>> = LazyLock::new(Default::default);
@@ -103,18 +115,29 @@ pub async fn track(tidal: &tokio::sync::Mutex<Tidal>, dir: &Path, id: u64, quali
     }
     let stream = tidal.stream(id, quality).await?;
     let (writer, reader) = create(&path)?;
-    tokio::spawn(async move { fetch(&reqwest::Client::new(), &stream.parts, writer).await });
+    tokio::spawn(async move { fetch(&stream.parts, writer).await });
     Ok(reader)
 }
 
+/// Watches a download from outside its reader.
+#[derive(Clone)]
+pub struct Download(Shared);
+
+impl Download {
+    /// Finished, successfully or not.
+    pub fn done(&self) -> bool {
+        self.0.0.lock().unwrap().done
+    }
+
+    pub fn wait(&self) {
+        let (lock, cv) = &*self.0;
+        drop(cv.wait_while(lock.lock().unwrap(), |p| !p.done).unwrap());
+    }
+}
+
 impl Reader {
-    /// Blocks until the download has finished; seeking needs the full length.
-    pub fn waiter(&self) -> impl Fn() + Send + Sync + 'static {
-        let shared = self.shared.clone();
-        move || {
-            let (lock, cv) = &*shared;
-            drop(cv.wait_while(lock.lock().unwrap(), |p| !p.done).unwrap());
-        }
+    pub fn download(&self) -> Download {
+        Download(self.shared.clone())
     }
 
     fn wait_until(&self, ready: impl Fn(&Progress) -> bool) -> MutexGuard<'_, Progress> {
@@ -172,12 +195,13 @@ impl symphonia::core::io::MediaSource for Reader {
     }
 }
 
-async fn fetch(http: &reqwest::Client, parts: &Parts, mut writer: Writer) {
-    let result = fetch_into(http, parts, &mut writer).await;
+async fn fetch(parts: &Parts, mut writer: Writer) {
+    let result = fetch_into(parts, &mut writer).await;
     writer.finish(result.map_err(|e| e.to_string()));
 }
 
-async fn fetch_into(http: &reqwest::Client, parts: &Parts, w: &mut Writer) -> anyhow::Result<()> {
+async fn fetch_into(parts: &Parts, w: &mut Writer) -> anyhow::Result<()> {
+    let http = &*HTTP;
     match parts {
         Parts::Urls(urls) => {
             for url in urls {
@@ -197,13 +221,20 @@ async fn fetch_into(http: &reqwest::Client, parts: &Parts, w: &mut Writer) -> an
                     w.append(&init)?;
                 }
             }
-            for n in *start.. {
-                let resp = http.get(template.replace("$Number$", &n.to_string())).send().await?;
-                // tidlers doesn't parse the segment timeline, so the first 4xx after segment one is the end.
-                if resp.status().is_client_error() && n > *start {
-                    break;
-                }
-                let segment = resp.error_for_status()?.bytes().await?;
+            let start = *start;
+            // A few segments in flight at once, written in order. tidlers doesn't parse the segment
+            // timeline, so the first 4xx after segment one is the end.
+            let mut segments = stream::iter(start..)
+                .map(|n| async move {
+                    let resp = http.get(template.replace("$Number$", &n.to_string())).send().await?;
+                    if resp.status().is_client_error() && n > start {
+                        return Ok(None);
+                    }
+                    anyhow::Ok(Some(resp.error_for_status()?.bytes().await?))
+                })
+                .buffered(PARALLEL);
+            while let Some(segment) = segments.next().await {
+                let Some(segment) = segment? else { break };
                 if dfla.is_none() {
                     w.append(&segment)?;
                     continue;

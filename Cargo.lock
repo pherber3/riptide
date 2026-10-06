@@ -3909,6 +3909,7 @@ dependencies = [
  "fastframe-audio",
  "fastframe-fonts",
  "fastframe-now-playing",
+ "futures-util",
  "image",
  "open",
  "reqwest",
