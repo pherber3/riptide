@@ -62,6 +62,8 @@ pub struct Track {
     pub album_id: Option<u64>,
     pub cover: Option<String>,
     pub duration: u32,
+    /// When it was added to the playlist or collection, as YYYY-MM-DD.
+    pub added: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -232,11 +234,10 @@ impl Tidal {
         info.or(self.client.session.auth.user_id).context("not signed in")
     }
 
-    /// A favorites list, newest first.
+    /// A favorites list, newest first, as `{"created": ..., "item": {...}}` entries.
     async fn favorites(&mut self, kind: &str) -> Result<Vec<Value>> {
         let path = format!("users/{}/favorites/{kind}", self.user()?);
-        let items = self.items(&path, &[("order", "DATE"), ("orderDirection", "DESC")], 10_000).await?;
-        Ok(items.into_iter().map(|mut v| v["item"].take()).collect())
+        self.items(&path, &[("order", "DATE"), ("orderDirection", "DESC")], 10_000).await
     }
 
     pub async fn favorite_tracks(&mut self) -> Result<Vec<Track>> {
@@ -244,11 +245,11 @@ impl Tidal {
     }
 
     pub async fn favorite_albums(&mut self) -> Result<Vec<Album>> {
-        Ok(self.favorites("albums").await?.iter().filter_map(album).collect())
+        Ok(self.favorites("albums").await?.iter().filter_map(|v| album(&v["item"])).collect())
     }
 
     pub async fn favorite_artists(&mut self) -> Result<Vec<Artist>> {
-        Ok(self.favorites("artists").await?.iter().filter_map(artist).collect())
+        Ok(self.favorites("artists").await?.iter().filter_map(|v| artist(&v["item"])).collect())
     }
 
     /// Your own playlists and the ones you follow, newest first.
@@ -286,10 +287,20 @@ fn image_id(v: &Value) -> Option<String> {
     v.as_str().map(Into::into)
 }
 
-/// A track, or a playlist/album item wrapping one (`{"item": {...}, "type": "track"}`); videos are skipped.
+fn date(v: &Value) -> Option<String> {
+    v.as_str().map(|d| d.chars().take(10).collect())
+}
+
+/// A track, or an item wrapping one (`{"item": {...}, "type": "track"}` or a favorite's `{"created": ..., "item": {...}}`);
+/// videos are skipped.
 fn track(v: &Value) -> Option<Track> {
     if v["item"].is_object() {
-        return if v["type"].as_str().is_some_and(|t| t.eq_ignore_ascii_case("track")) { track(&v["item"]) } else { None };
+        if v["type"].as_str().is_some_and(|t| !t.eq_ignore_ascii_case("track")) {
+            return None;
+        }
+        let mut t = track(&v["item"])?;
+        t.added = date(&v["dateAdded"]).or_else(|| date(&v["created"])).or(t.added);
+        return Some(t);
     }
     let mut title = text(&v["title"]);
     if let Some(version) = v["version"].as_str().filter(|s| !s.is_empty()) {
@@ -305,6 +316,7 @@ fn track(v: &Value) -> Option<Track> {
         album_id: v["album"]["id"].as_u64(),
         cover: image_id(&v["album"]["cover"]),
         duration: v["duration"].as_u64().unwrap_or(0) as u32,
+        added: date(&v["dateAdded"]),
     })
 }
 

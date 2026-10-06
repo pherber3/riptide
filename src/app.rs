@@ -79,6 +79,7 @@ enum Action {
     Seek(f64),
     Shuffle,
     Repeat,
+    Sort(Sort),
     Back,
     Quality(Quality),
 }
@@ -296,6 +297,12 @@ impl App {
                 })
             }),
             Action::Queue => self.show(Page::Queue),
+            // Sorting by the current column again reverses it, as Tidal does.
+            Action::Sort(sort) => {
+                let view = &mut self.view;
+                view.reverse = view.sort == sort && !view.reverse;
+                (view.sort, view.rows) = (sort, None);
+            }
             // Back to the last search results rather than searching again.
             Action::SearchPage if !matches!(self.page, Page::Search(_)) => {
                 let at = self.back.iter().rposition(|p| matches!(p, Page::Search(_)));
@@ -610,8 +617,7 @@ impl App {
             };
             self.view.rows = Some(rows);
         }
-        let sorts = sorts(&self.page);
-        let in_playlist = matches!(self.page, Page::Playlist(..));
+        let sorted = Some((self.view.sort, self.view.reverse));
         let (playing, favorites) = (self.current().map(|t| t.id), &self.favorites);
         let list = |queue| Rows { playing, favorites, queue };
         egui::CentralPanel::default().show(ui, |ui| {
@@ -626,28 +632,8 @@ impl App {
                 if let Some(e) = &self.error {
                     ui.colored_label(Color32::LIGHT_RED, e);
                 }
-                if !sorts.is_empty() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let view = &mut self.view;
-                        let arrow = if view.reverse { "↑" } else { "↓" };
-                        let mut changed = ui.button(arrow).on_hover_text("Reverse the order").clicked();
-                        view.reverse ^= changed;
-                        egui::ComboBox::from_id_salt("sort").selected_text(view.sort.label(in_playlist)).show_ui(ui, |ui| {
-                            for &sort in sorts {
-                                changed |= ui.selectable_value(&mut view.sort, sort, sort.label(in_playlist)).changed();
-                            }
-                        });
-                        let filter = egui::TextEdit::singleline(&mut view.filter).hint_text("Filter").desired_width(200.0);
-                        changed |= ui.add(filter).changed();
-                        if changed {
-                            view.rows = None;
-                            ui.ctx().request_repaint();
-                        }
-                    });
-                }
             });
             ui.add_space(8.0);
-            let order = self.view.rows.as_deref();
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &self.page {
                 Page::Loading => {
                     ui.add_space(40.0);
@@ -659,48 +645,50 @@ impl App {
                     if header(ui, album.cover.as_deref(), 640, false, &album.title, &sub) {
                         actions.push(Action::Play(tracks.clone(), 0));
                     }
-                    list(false).show(ui, tracks, None, false, actions);
+                    list(false).show(ui, tracks, None, false, None, actions);
                 }
                 Page::Artist(artist, top, albums) => {
                     if header(ui, artist.picture.as_deref(), 480, true, &artist.name, "") {
                         actions.push(Action::Play(top.clone(), 0));
                     }
                     section(ui, "Top tracks");
-                    list(false).show(ui, top, None, true, actions);
+                    list(false).show(ui, top, None, true, None, actions);
                     section(ui, "Albums");
                     album_cards(ui, albums, None, actions);
                 }
                 Page::Playlist(playlist, tracks) => {
                     let sub = format!("{} tracks", playlist.count);
                     if header(ui, playlist.cover.as_deref(), 640, false, &playlist.title, &sub) {
-                        actions.push(Action::Play(in_order(tracks, order), 0));
+                        actions.push(Action::Play(in_order(tracks, self.view.rows.as_deref()), 0));
                     }
-                    list(false).show(ui, tracks, order, true, actions);
+                    filter_box(ui, &mut self.view, "Filter playlist on title, artist or album");
+                    list(false).show(ui, tracks, self.view.rows.as_deref(), true, sorted, actions);
                 }
                 Page::Tracks(tracks) => {
                     if title_with_play(ui, "Tracks", !tracks.is_empty()) {
-                        actions.push(Action::Play(in_order(tracks, order), 0));
+                        actions.push(Action::Play(in_order(tracks, self.view.rows.as_deref()), 0));
                     }
-                    list(false).show(ui, tracks, order, true, actions);
+                    filter_box(ui, &mut self.view, "Filter tracks on title, artist or album");
+                    list(false).show(ui, tracks, self.view.rows.as_deref(), true, sorted, actions);
                 }
                 Page::Albums(albums) => {
-                    section(ui, "Albums");
-                    album_cards(ui, albums, order, actions);
+                    grid_controls(ui, "Albums", &mut self.view, &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year], actions);
+                    album_cards(ui, albums, self.view.rows.as_deref(), actions);
                 }
                 Page::Artists(artists) => {
-                    section(ui, "Artists");
-                    artist_cards(ui, artists, order, actions);
+                    grid_controls(ui, "Artists", &mut self.view, &[Sort::Added, Sort::Title], actions);
+                    artist_cards(ui, artists, self.view.rows.as_deref(), actions);
                 }
                 Page::Playlists(playlists) => {
-                    section(ui, "Playlists");
-                    playlist_cards(ui, playlists, order, actions);
+                    grid_controls(ui, "Playlists", &mut self.view, &[Sort::Added, Sort::Title], actions);
+                    playlist_cards(ui, playlists, self.view.rows.as_deref(), actions);
                 }
                 Page::Queue => {
                     section(ui, "Queue");
                     if self.queue.is_empty() {
                         ui.label(RichText::new("Nothing queued. Right-click a track to add it.").weak());
                     }
-                    list(true).show(ui, &self.queue, None, true, actions);
+                    list(true).show(ui, &self.queue, None, true, None, actions);
                 }
             });
         });
@@ -742,27 +730,53 @@ enum Sort {
 }
 
 impl Sort {
-    fn label(self, in_playlist: bool) -> &'static str {
-        match self {
-            Sort::Added if in_playlist => "Playlist order",
-            Sort::Added => "Recently added",
-            Sort::Title => "A–Z",
-            Sort::Artist => "Artist",
-            Sort::Album => "Album",
-            Sort::Year => "Year",
-            Sort::Duration => "Duration",
+    fn label(self, reverse: bool) -> &'static str {
+        match (self, reverse) {
+            (Sort::Added, false) => "Recently added",
+            (Sort::Added, true) => "Oldest added",
+            (Sort::Title, false) => "A–Z",
+            (Sort::Title, true) => "Z–A",
+            (Sort::Artist, false) => "Artist A–Z",
+            (Sort::Artist, true) => "Artist Z–A",
+            (Sort::Album, false) => "Album A–Z",
+            (Sort::Album, true) => "Album Z–A",
+            (Sort::Year, false) => "Newest",
+            (Sort::Year, true) => "Oldest",
+            (Sort::Duration, false) => "Shortest",
+            (Sort::Duration, true) => "Longest",
         }
     }
 }
 
-fn sorts(page: &Page) -> &'static [Sort] {
-    use Sort::*;
-    match page {
-        Page::Tracks(_) | Page::Playlist(..) => &[Added, Title, Artist, Album, Duration],
-        Page::Albums(_) => &[Added, Title, Artist, Year],
-        Page::Artists(_) | Page::Playlists(_) => &[Added, Title],
-        _ => &[],
+fn filter_box(ui: &mut Ui, view: &mut View, hint: &str) {
+    let filter = egui::TextEdit::singleline(&mut view.filter).hint_text(hint).desired_width(f32::INFINITY);
+    if ui.add(filter).changed() {
+        view.rows = None;
+        ui.ctx().request_repaint();
     }
+    ui.add_space(8.0);
+}
+
+/// Title, filter and sort dropdown for the card grids; picking the current sort again reverses it.
+fn grid_controls(ui: &mut Ui, title: &str, view: &mut View, sorts: &[Sort], actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        section(ui, title);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            egui::ComboBox::from_id_salt("sort").selected_text(view.sort.label(view.reverse)).show_ui(ui, |ui| {
+                for &sort in sorts {
+                    let selected = view.sort == sort;
+                    if ui.selectable_label(selected, sort.label(selected && view.reverse)).clicked() {
+                        actions.push(Action::Sort(sort));
+                    }
+                }
+            });
+            let filter = egui::TextEdit::singleline(&mut view.filter).hint_text("Filter").desired_width(220.0);
+            if ui.add(filter).changed() {
+                view.rows = None;
+                ui.ctx().request_repaint();
+            }
+        });
+    });
 }
 
 /// The filter and sort of a list page, and the resulting row order (None until recomputed).
@@ -802,7 +816,7 @@ impl Sortable for Album {
 
     fn key(&self, sort: Sort) -> (u32, String) {
         match sort {
-            Sort::Year => (self.year.parse().unwrap_or(0), String::new()),
+            Sort::Year => (u32::MAX - self.year.parse().unwrap_or(0), String::new()),
             Sort::Artist => (0, self.artist.to_lowercase()),
             _ => (0, self.title.to_lowercase()),
         }
@@ -996,7 +1010,7 @@ fn search_page(ui: &mut Ui, r: &Results, rows: &Rows<'_>, actions: &mut Vec<Acti
     }
     if !r.tracks.is_empty() {
         section(ui, "Tracks");
-        rows.show(ui, &r.tracks, None, true, actions);
+        rows.show(ui, &r.tracks, None, true, None, actions);
     }
     if !r.artists.is_empty() {
         section(ui, "Artists");
@@ -1026,32 +1040,64 @@ struct Rows<'a> {
     queue: bool,
 }
 
+const TIME: f32 = 56.0;
+const NUMBER: f32 = 36.0;
+const HEART: f32 = 28.0;
+
 impl Rows<'_> {
+    /// A table of tracks under clickable column headers when `sorted` is set (sort, reversed).
     /// Click a title to play the list from there; right-click it for more.
-    fn show(&self, ui: &mut Ui, tracks: &[Track], order: Option<&[usize]>, with_album: bool, actions: &mut Vec<Action>) {
-        let width = ui.available_width() - 130.0;
+    fn show(
+        &self,
+        ui: &mut Ui,
+        tracks: &[Track],
+        order: Option<&[usize]>,
+        with_album: bool,
+        sorted: Option<(Sort, bool)>,
+        actions: &mut Vec<Action>,
+    ) {
+        let with_added = tracks.iter().any(|t| t.added.is_some());
+        let spacing = ui.spacing().item_spacing.x;
+        let free = ui.available_width() - NUMBER - TIME - HEART - spacing * 6.0;
+        let mut columns = vec![(Sort::Title, "TITLE", 0.4), (Sort::Artist, "ARTIST", 0.25)];
+        if with_album {
+            columns.push((Sort::Album, "ALBUM", 0.22));
+        }
+        if with_added {
+            columns.push((Sort::Added, "DATE ADDED", 0.13));
+        }
+        let total: f32 = columns.iter().map(|c| c.2).sum();
+        let width = |share: f32| free * share / total;
+        ui.horizontal(|ui| {
+            cell(ui, NUMBER, |ui| {
+                ui.label(RichText::new("#").small().weak());
+            });
+            for &(sort, name, share) in &columns {
+                cell(ui, width(share), |ui| column_header(ui, name, sort, sorted, actions));
+            }
+            cell(ui, TIME, |ui| column_header(ui, "TIME", Sort::Duration, sorted, actions));
+        });
+        ui.separator();
         for (pos, t) in ordered(tracks, order).enumerate() {
-            let i = order.map_or(pos, |o| o[pos]);
             // Rows scrolled out of view only take up space, so long playlists stay cheap to draw.
-            if !ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(width, ROW))) {
-                ui.allocate_space(vec2(width, ROW));
+            if !ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(free, ROW))) {
+                ui.allocate_space(vec2(free, ROW));
                 continue;
             }
+            let i = order.map_or(pos, |o| o[pos]);
             ui.horizontal(|ui| {
                 let color = if self.playing == Some(t.id) { ACCENT } else { ui.visuals().strong_text_color() };
-                cell(ui, 32.0, |ui| {
+                cell(ui, NUMBER, |ui| {
                     ui.label(RichText::new((pos + 1).to_string()).weak());
                 });
-                cell(ui, 24.0, |ui| heart(ui, t.id, self.favorites, actions));
-                cell(ui, width * if with_album { 0.45 } else { 0.65 }, |ui| {
-                    let title = egui::Label::new(RichText::new(&t.title).color(color)).truncate().sense(Sense::click());
-                    let title = ui.add(title);
+                cell(ui, width(0.4), |ui| {
+                    let title = ui.add(egui::Label::new(RichText::new(&t.title).color(color)).truncate().sense(Sense::click()));
                     if title.clicked() {
                         actions.push(if self.queue { Action::Jump(i) } else { Action::Play(in_order(tracks, order), pos) });
                     }
                     title.context_menu(|ui| self.menu(ui, tracks, i, actions));
                 });
-                cell(ui, width * 0.3, |ui| {
+                cell(ui, width(0.25), |ui| {
                     if ui.add(egui::Link::new(&t.artist)).clicked()
                         && let Some(id) = t.artist_id
                     {
@@ -1059,7 +1105,7 @@ impl Rows<'_> {
                     }
                 });
                 if with_album {
-                    cell(ui, width * 0.2, |ui| {
+                    cell(ui, width(0.22), |ui| {
                         if ui.add(egui::Link::new(&t.album)).clicked()
                             && let Some(id) = t.album_id
                         {
@@ -1067,7 +1113,15 @@ impl Rows<'_> {
                         }
                     });
                 }
-                ui.label(RichText::new(clock(f64::from(t.duration))).weak());
+                if with_added {
+                    cell(ui, width(0.13), |ui| {
+                        ui.label(RichText::new(t.added.as_deref().unwrap_or_default()).weak());
+                    });
+                }
+                cell(ui, TIME, |ui| {
+                    ui.label(RichText::new(clock(f64::from(t.duration))).weak());
+                });
+                heart(ui, t.id, self.favorites, actions);
             });
         }
     }
@@ -1100,5 +1154,25 @@ impl Rows<'_> {
         if let Some(id) = t.artist_id {
             item("Go to artist", Action::Artist(id));
         }
+    }
+}
+
+/// A column title; clickable with an arrow on the sorted column when the table sorts.
+fn column_header(ui: &mut Ui, name: &str, sort: Sort, sorted: Option<(Sort, bool)>, actions: &mut Vec<Action>) {
+    let Some((current, reverse)) = sorted else {
+        ui.label(RichText::new(name).small().weak());
+        return;
+    };
+    let active = current == sort;
+    let text = RichText::new(name).small();
+    let text = if active { text.color(ACCENT) } else { text.weak() };
+    if ui.add(egui::Label::new(text).sense(Sense::click())).clicked() {
+        actions.push(Action::Sort(sort));
+    }
+    if active {
+        let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+        let (c, flip) = (rect.center(), if reverse { -1.0 } else { 1.0 });
+        let points = vec![c + vec2(-4.0, -2.0 * flip), c + vec2(4.0, -2.0 * flip), c + vec2(0.0, 3.0 * flip)];
+        ui.painter().add(egui::Shape::convex_polygon(points, ACCENT, egui::Stroke::NONE));
     }
 }
