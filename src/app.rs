@@ -106,6 +106,7 @@ pub struct App {
     shown: np::State,
     page: Page,
     back: Vec<Page>,
+    view: View,
     query: String,
     queue: Vec<Track>,
     index: Option<usize>,
@@ -162,6 +163,7 @@ impl App {
             shown: np::State::default(),
             page: Page::Search(Results::default()),
             back: Vec::new(),
+            view: View::default(),
             query: String::new(),
             queue: Vec::new(),
             index: None,
@@ -189,6 +191,7 @@ impl App {
     }
 
     fn show(&mut self, page: Page) {
+        self.view = View::default();
         let old = std::mem::replace(&mut self.page, page);
         if !matches!(old, Page::Loading) {
             self.back.push(old);
@@ -362,7 +365,7 @@ impl App {
             }
             Action::Back => {
                 if let Some(page) = self.back.pop() {
-                    self.page = page;
+                    (self.page, self.view) = (page, View::default());
                     self.ctx.forget_all_images();
                 }
             }
@@ -372,7 +375,7 @@ impl App {
     fn receive(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Page(page) => self.page = page,
+                Msg::Page(page) => (self.page, self.view) = (page, View::default()),
                 Msg::Ready(id, reader) if self.current().is_some_and(|t| t.id == id) => {
                     self.player.send(Cmd::Load(reader));
                     if let Some(seconds) = self.resume_at.take() {
@@ -597,6 +600,18 @@ impl App {
     }
 
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        if self.view.rows.is_none() {
+            let rows = match &self.page {
+                Page::Tracks(tracks) | Page::Playlist(_, tracks) => arrange(tracks, &self.view),
+                Page::Albums(albums) => arrange(albums, &self.view),
+                Page::Artists(artists) => arrange(artists, &self.view),
+                Page::Playlists(playlists) => arrange(playlists, &self.view),
+                _ => Vec::new(),
+            };
+            self.view.rows = Some(rows);
+        }
+        let sorts = sorts(&self.page);
+        let in_playlist = matches!(self.page, Page::Playlist(..));
         let (playing, favorites) = (self.current().map(|t| t.id), &self.favorites);
         let list = |queue| Rows { playing, favorites, queue };
         egui::CentralPanel::default().show(ui, |ui| {
@@ -611,8 +626,28 @@ impl App {
                 if let Some(e) = &self.error {
                     ui.colored_label(Color32::LIGHT_RED, e);
                 }
+                if !sorts.is_empty() {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let view = &mut self.view;
+                        let arrow = if view.reverse { "↑" } else { "↓" };
+                        let mut changed = ui.button(arrow).on_hover_text("Reverse the order").clicked();
+                        view.reverse ^= changed;
+                        egui::ComboBox::from_id_salt("sort").selected_text(view.sort.label(in_playlist)).show_ui(ui, |ui| {
+                            for &sort in sorts {
+                                changed |= ui.selectable_value(&mut view.sort, sort, sort.label(in_playlist)).changed();
+                            }
+                        });
+                        let filter = egui::TextEdit::singleline(&mut view.filter).hint_text("Filter").desired_width(200.0);
+                        changed |= ui.add(filter).changed();
+                        if changed {
+                            view.rows = None;
+                            ui.ctx().request_repaint();
+                        }
+                    });
+                }
             });
             ui.add_space(8.0);
+            let order = self.view.rows.as_deref();
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &self.page {
                 Page::Loading => {
                     ui.add_space(40.0);
@@ -624,48 +659,48 @@ impl App {
                     if header(ui, album.cover.as_deref(), 640, false, &album.title, &sub) {
                         actions.push(Action::Play(tracks.clone(), 0));
                     }
-                    list(false).show(ui, tracks, false, actions);
+                    list(false).show(ui, tracks, None, false, actions);
                 }
                 Page::Artist(artist, top, albums) => {
                     if header(ui, artist.picture.as_deref(), 480, true, &artist.name, "") {
                         actions.push(Action::Play(top.clone(), 0));
                     }
                     section(ui, "Top tracks");
-                    list(false).show(ui, top, true, actions);
+                    list(false).show(ui, top, None, true, actions);
                     section(ui, "Albums");
-                    album_cards(ui, albums, actions);
+                    album_cards(ui, albums, None, actions);
                 }
                 Page::Playlist(playlist, tracks) => {
                     let sub = format!("{} tracks", playlist.count);
                     if header(ui, playlist.cover.as_deref(), 640, false, &playlist.title, &sub) {
-                        actions.push(Action::Play(tracks.clone(), 0));
+                        actions.push(Action::Play(in_order(tracks, order), 0));
                     }
-                    list(false).show(ui, tracks, true, actions);
+                    list(false).show(ui, tracks, order, true, actions);
                 }
                 Page::Tracks(tracks) => {
                     if title_with_play(ui, "Tracks", !tracks.is_empty()) {
-                        actions.push(Action::Play(tracks.clone(), 0));
+                        actions.push(Action::Play(in_order(tracks, order), 0));
                     }
-                    list(false).show(ui, tracks, true, actions);
+                    list(false).show(ui, tracks, order, true, actions);
                 }
                 Page::Albums(albums) => {
                     section(ui, "Albums");
-                    album_cards(ui, albums, actions);
+                    album_cards(ui, albums, order, actions);
                 }
                 Page::Artists(artists) => {
                     section(ui, "Artists");
-                    artist_cards(ui, artists, actions);
+                    artist_cards(ui, artists, order, actions);
                 }
                 Page::Playlists(playlists) => {
                     section(ui, "Playlists");
-                    playlist_cards(ui, playlists, actions);
+                    playlist_cards(ui, playlists, order, actions);
                 }
                 Page::Queue => {
                     section(ui, "Queue");
                     if self.queue.is_empty() {
                         ui.label(RichText::new("Nothing queued. Right-click a track to add it.").weak());
                     }
-                    list(true).show(ui, &self.queue, true, actions);
+                    list(true).show(ui, &self.queue, None, true, actions);
                 }
             });
         });
@@ -693,6 +728,126 @@ impl eframe::App for App {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Sort {
+    #[default]
+    Added,
+    Title,
+    Artist,
+    Album,
+    Year,
+    Duration,
+}
+
+impl Sort {
+    fn label(self, in_playlist: bool) -> &'static str {
+        match self {
+            Sort::Added if in_playlist => "Playlist order",
+            Sort::Added => "Recently added",
+            Sort::Title => "A–Z",
+            Sort::Artist => "Artist",
+            Sort::Album => "Album",
+            Sort::Year => "Year",
+            Sort::Duration => "Duration",
+        }
+    }
+}
+
+fn sorts(page: &Page) -> &'static [Sort] {
+    use Sort::*;
+    match page {
+        Page::Tracks(_) | Page::Playlist(..) => &[Added, Title, Artist, Album, Duration],
+        Page::Albums(_) => &[Added, Title, Artist, Year],
+        Page::Artists(_) | Page::Playlists(_) => &[Added, Title],
+        _ => &[],
+    }
+}
+
+/// The filter and sort of a list page, and the resulting row order (None until recomputed).
+#[derive(Default)]
+struct View {
+    filter: String,
+    sort: Sort,
+    reverse: bool,
+    rows: Option<Vec<usize>>,
+}
+
+trait Sortable {
+    /// Lowercase text the filter matches.
+    fn text(&self) -> String;
+    fn key(&self, sort: Sort) -> (u32, String);
+}
+
+impl Sortable for Track {
+    fn text(&self) -> String {
+        format!("{} {} {}", self.title, self.artist, self.album).to_lowercase()
+    }
+
+    fn key(&self, sort: Sort) -> (u32, String) {
+        match sort {
+            Sort::Duration => (self.duration, String::new()),
+            Sort::Artist => (0, self.artist.to_lowercase()),
+            Sort::Album => (0, self.album.to_lowercase()),
+            _ => (0, self.title.to_lowercase()),
+        }
+    }
+}
+
+impl Sortable for Album {
+    fn text(&self) -> String {
+        format!("{} {}", self.title, self.artist).to_lowercase()
+    }
+
+    fn key(&self, sort: Sort) -> (u32, String) {
+        match sort {
+            Sort::Year => (self.year.parse().unwrap_or(0), String::new()),
+            Sort::Artist => (0, self.artist.to_lowercase()),
+            _ => (0, self.title.to_lowercase()),
+        }
+    }
+}
+
+impl Sortable for Artist {
+    fn text(&self) -> String {
+        self.name.to_lowercase()
+    }
+
+    fn key(&self, _: Sort) -> (u32, String) {
+        (0, self.name.to_lowercase())
+    }
+}
+
+impl Sortable for Playlist {
+    fn text(&self) -> String {
+        self.title.to_lowercase()
+    }
+
+    fn key(&self, _: Sort) -> (u32, String) {
+        (0, self.title.to_lowercase())
+    }
+}
+
+fn arrange<T: Sortable>(items: &[T], view: &View) -> Vec<usize> {
+    let filter = view.filter.to_lowercase();
+    let mut rows: Vec<usize> = (0..items.len()).filter(|&i| filter.is_empty() || items[i].text().contains(&filter)).collect();
+    if view.sort != Sort::Added {
+        rows.sort_by_cached_key(|&i| items[i].key(view.sort));
+    }
+    if view.reverse {
+        rows.reverse();
+    }
+    rows
+}
+
+/// Items in the given row order, or as they are.
+fn ordered<'a, T>(items: &'a [T], order: Option<&'a [usize]>) -> impl Iterator<Item = &'a T> {
+    (0..order.map_or(items.len(), <[usize]>::len)).map(move |p| &items[order.map_or(p, |o| o[p])])
+}
+
+fn in_order(tracks: &[Track], order: Option<&[usize]>) -> Vec<Track> {
+    ordered(tracks, order).cloned().collect()
 }
 
 fn shuffle<T>(items: &mut [T]) {
@@ -803,9 +958,9 @@ fn card(ui: &mut Ui, image: Option<&str>, round: bool, title: &str, subtitle: &s
     clicked
 }
 
-fn album_cards(ui: &mut Ui, albums: &[Album], actions: &mut Vec<Action>) {
+fn album_cards(ui: &mut Ui, albums: &[Album], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
-        for a in albums {
+        for a in ordered(albums, order) {
             if card(ui, a.cover.as_deref(), false, &a.title, &format!("{} · {}", a.artist, a.year)) {
                 actions.push(Action::Album(a.id));
             }
@@ -813,9 +968,9 @@ fn album_cards(ui: &mut Ui, albums: &[Album], actions: &mut Vec<Action>) {
     });
 }
 
-fn artist_cards(ui: &mut Ui, artists: &[Artist], actions: &mut Vec<Action>) {
+fn artist_cards(ui: &mut Ui, artists: &[Artist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
-        for a in artists {
+        for a in ordered(artists, order) {
             if card(ui, a.picture.as_deref(), true, &a.name, "Artist") {
                 actions.push(Action::Artist(a.id));
             }
@@ -823,9 +978,9 @@ fn artist_cards(ui: &mut Ui, artists: &[Artist], actions: &mut Vec<Action>) {
     });
 }
 
-fn playlist_cards(ui: &mut Ui, playlists: &[Playlist], actions: &mut Vec<Action>) {
+fn playlist_cards(ui: &mut Ui, playlists: &[Playlist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
-        for p in playlists {
+        for p in ordered(playlists, order) {
             if card(ui, p.cover.as_deref(), false, &p.title, &format!("{} tracks", p.count)) {
                 actions.push(Action::Playlist(p.id.clone()));
             }
@@ -841,19 +996,19 @@ fn search_page(ui: &mut Ui, r: &Results, rows: &Rows<'_>, actions: &mut Vec<Acti
     }
     if !r.tracks.is_empty() {
         section(ui, "Tracks");
-        rows.show(ui, &r.tracks, true, actions);
+        rows.show(ui, &r.tracks, None, true, actions);
     }
     if !r.artists.is_empty() {
         section(ui, "Artists");
-        artist_cards(ui, &r.artists, actions);
+        artist_cards(ui, &r.artists, None, actions);
     }
     if !r.albums.is_empty() {
         section(ui, "Albums");
-        album_cards(ui, &r.albums, actions);
+        album_cards(ui, &r.albums, None, actions);
     }
     if !r.playlists.is_empty() {
         section(ui, "Playlists");
-        playlist_cards(ui, &r.playlists, actions);
+        playlist_cards(ui, &r.playlists, None, actions);
     }
 }
 
@@ -873,9 +1028,10 @@ struct Rows<'a> {
 
 impl Rows<'_> {
     /// Click a title to play the list from there; right-click it for more.
-    fn show(&self, ui: &mut Ui, tracks: &[Track], with_album: bool, actions: &mut Vec<Action>) {
+    fn show(&self, ui: &mut Ui, tracks: &[Track], order: Option<&[usize]>, with_album: bool, actions: &mut Vec<Action>) {
         let width = ui.available_width() - 130.0;
-        for (i, t) in tracks.iter().enumerate() {
+        for (pos, t) in ordered(tracks, order).enumerate() {
+            let i = order.map_or(pos, |o| o[pos]);
             // Rows scrolled out of view only take up space, so long playlists stay cheap to draw.
             if !ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(width, ROW))) {
                 ui.allocate_space(vec2(width, ROW));
@@ -884,14 +1040,14 @@ impl Rows<'_> {
             ui.horizontal(|ui| {
                 let color = if self.playing == Some(t.id) { ACCENT } else { ui.visuals().strong_text_color() };
                 cell(ui, 32.0, |ui| {
-                    ui.label(RichText::new((i + 1).to_string()).weak());
+                    ui.label(RichText::new((pos + 1).to_string()).weak());
                 });
                 cell(ui, 24.0, |ui| heart(ui, t.id, self.favorites, actions));
                 cell(ui, width * if with_album { 0.45 } else { 0.65 }, |ui| {
                     let title = egui::Label::new(RichText::new(&t.title).color(color)).truncate().sense(Sense::click());
                     let title = ui.add(title);
                     if title.clicked() {
-                        actions.push(if self.queue { Action::Jump(i) } else { Action::Play(tracks.to_vec(), i) });
+                        actions.push(if self.queue { Action::Jump(i) } else { Action::Play(in_order(tracks, order), pos) });
                     }
                     title.context_menu(|ui| self.menu(ui, tracks, i, actions));
                 });
