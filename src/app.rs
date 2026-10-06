@@ -98,6 +98,7 @@ enum Action {
     Repeat,
     Sort(Sort),
     Back,
+    Forward,
     Quality(Quality),
 }
 
@@ -124,6 +125,7 @@ pub struct App {
     shown: np::State,
     page: Page,
     back: Vec<Page>,
+    forward: Vec<Page>,
     view: View,
     /// The sort each kind of list page was last left in.
     sorts: HashMap<&'static str, (Sort, bool)>,
@@ -202,6 +204,7 @@ impl App {
             shown: np::State::default(),
             page: Page::Loading,
             back: Vec::new(),
+            forward: Vec::new(),
             view: View::default(),
             sorts,
             query: String::new(),
@@ -239,7 +242,21 @@ impl App {
         if !matches!(old, Page::Loading) {
             self.back.push(old);
         }
+        self.forward.clear();
         self.ctx.forget_all_images();
+    }
+
+    /// Steps through history like a browser: `back` pops from `from` and pushes the current page onto `to`.
+    fn step(&mut self, back: bool) {
+        let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
+        if let Some(page) = from.pop() {
+            let old = std::mem::replace(&mut self.page, page);
+            if !matches!(old, Page::Loading) {
+                to.push(old);
+            }
+            self.reset_view();
+            self.ctx.forget_all_images();
+        }
     }
 
     fn navigate(&mut self, load: impl Future<Output = Result<Page>> + Send + 'static) {
@@ -448,13 +465,8 @@ impl App {
                     self.play(i);
                 }
             }
-            Action::Back => {
-                if let Some(page) = self.back.pop() {
-                    self.page = page;
-                    self.reset_view();
-                    self.ctx.forget_all_images();
-                }
-            }
+            Action::Back => self.step(true),
+            Action::Forward => self.step(false),
         }
     }
 
@@ -760,6 +772,9 @@ impl App {
                 if ui.add_enabled(!self.back.is_empty(), egui::Button::new("⬅")).clicked() {
                     actions.push(Action::Back);
                 }
+                if ui.add_enabled(!self.forward.is_empty(), egui::Button::new("➡")).clicked() {
+                    actions.push(Action::Forward);
+                }
                 let search = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search").desired_width(360.0));
                 if search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     actions.push(Action::Search);
@@ -896,6 +911,16 @@ impl eframe::App for App {
         if ui.input(|i| i.key_pressed(Key::Space)) && ui.ctx().memory(|m| m.focused().is_none()) {
             actions.push(Action::Toggle);
         }
+        // The mouse's side buttons, Alt+arrows and the keyboard's Back key, as in a web browser.
+        ui.input(|i| {
+            let alt = |key| i.modifiers.alt && i.key_pressed(key);
+            if i.pointer.button_pressed(egui::PointerButton::Extra1) || alt(Key::ArrowLeft) || i.key_pressed(Key::BrowserBack) {
+                actions.push(Action::Back);
+            }
+            if i.pointer.button_pressed(egui::PointerButton::Extra2) || alt(Key::ArrowRight) {
+                actions.push(Action::Forward);
+            }
+        });
         if matches!(self.page, Page::Lyrics)
             && let (Some(t), Some(tidal)) = (self.current(), self.tidal.clone())
             && self.lyrics.as_ref().is_none_or(|(id, _)| *id != t.id)
