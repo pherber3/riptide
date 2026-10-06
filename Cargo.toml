@@ -1,0 +1,24 @@
+[package]
+name = "tidalfast"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+tidlers = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = "0.13"
+open = "5"
+symphonia = { version = "0.5", default-features = false, features = ["flac", "isomp4", "aac"] }
+rubato = "0.16"
+rtrb = "0.3"
+fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
