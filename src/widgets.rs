@@ -679,7 +679,7 @@ impl Rows<'_> {
         }
         ui.separator();
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-        ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Find a playlist").desired_width(216.0));
+        search_field(ui, &mut filter, "Find a playlist", 216.0, filter_id.with("field"));
         let needle = filter.to_lowercase();
         ui.label(RichText::new(if needle.is_empty() { "RECENT" } else { "MATCHING" }).font(semibold(11.0)).color(DIM));
         let shown = if needle.is_empty() { 10 } else { usize::MAX };
