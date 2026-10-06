@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
-use egui::ColorImage;
+use egui::{Color32, ColorImage};
 use egui::load::{ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint};
 
 enum Entry {
@@ -25,6 +25,27 @@ impl Art {
         let _ = std::fs::create_dir_all(&dir);
         Self { dir, rt, entries: Default::default() }
     }
+}
+
+/// The colour of each large (header) artwork decoded, for the glow behind its page.
+static TINTS: LazyLock<Mutex<HashMap<String, Color32>>> = LazyLock::new(Default::default);
+
+pub fn tint(uri: &str) -> Option<Color32> {
+    TINTS.lock().unwrap().get(uri).copied()
+}
+
+/// The artwork's average colour, weighted toward its most colourful pixels and set to one
+/// brightness: vivid, but dark enough to sit behind white text.
+fn mood(image: &ColorImage) -> Color32 {
+    let mut sum = [0.0f32; 3];
+    for p in image.pixels.iter().step_by((image.pixels.len() / 2048).max(1)) {
+        let [r, g, b, _] = p.to_array().map(f32::from);
+        let weight = r.max(g).max(b) - r.min(g).min(b) + 8.0;
+        sum = [sum[0] + r * weight, sum[1] + g * weight, sum[2] + b * weight];
+    }
+    let scale = 120.0 / sum.iter().copied().fold(1.0, f32::max);
+    let [r, g, b] = sum.map(|c| (c * scale) as u8);
+    Color32::from_rgb(r, g, b)
 }
 
 fn decode(bytes: &[u8]) -> Option<ColorImage> {
@@ -72,6 +93,9 @@ impl ImageLoader for Art {
                 .await
                 .ok()
                 .flatten();
+            }
+            if let Some(image) = image.as_ref().filter(|i| i.width() >= 480) {
+                TINTS.lock().unwrap().insert(uri.clone(), mood(image));
             }
             let entry = image.map_or(Entry::Failed, |image| Entry::Ready(Arc::new(image)));
             entries.lock().unwrap().insert(uri, entry);

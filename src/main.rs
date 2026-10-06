@@ -7,6 +7,7 @@ mod decode;
 mod fonts;
 mod player;
 mod queue;
+mod theme;
 mod tidal;
 mod view;
 mod widgets;
