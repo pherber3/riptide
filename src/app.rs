@@ -13,6 +13,7 @@ use fastframe_now_playing as np;
 use crate::art::Art;
 use crate::cache;
 use crate::decode::Decoder;
+use crate::lastfm::{self, LastFm};
 use crate::player::{Cmd, Event, Player};
 use crate::queue::{self, Queue, Repeat};
 use crate::tidal::{self, Card, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
@@ -181,6 +182,7 @@ enum Msg {
     Playlists(Vec<Playlist>),
     /// A playlist just made, with a track already in it.
     Created(Playlist),
+    LastFm(LastFm),
     /// A short confirmation for the top bar.
     Notice(String),
     Lyrics(u64, Lyrics),
@@ -204,6 +206,7 @@ pub enum Action {
     AddToPlaylist(String, u64),
     /// Make a playlist with this name and add a track to it.
     CreatePlaylist(String, u64),
+    ConnectLastFm,
     Toggle,
     Next,
     Prev,
@@ -266,6 +269,10 @@ pub struct App {
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
+    /// Scrobbling, when `data/lastfm.txt` has an API account.
+    lastfm: Option<LastFm>,
+    /// The track being listened to and when it started (Unix seconds), to scrobble when it ends.
+    listening: Option<(Track, u64)>,
 }
 
 impl App {
@@ -330,6 +337,8 @@ impl App {
             resume_at: None,
             lyrics: None,
             lyric_line: None,
+            lastfm: LastFm::load(LastFm::path(&dir.join("data"))),
+            listening: None,
         };
         if app.busy {
             let session = app.session.clone();
@@ -377,8 +386,29 @@ impl App {
         }
     }
 
+    /// A scrobble for the track that was playing, if enough of it played.
+    fn finish_listening(&mut self) -> Option<impl Future<Output = Result<()>> + Send + 'static> {
+        let played = self.player.status.position();
+        let (track, started) = self.listening.take()?;
+        let lastfm = self.lastfm.clone().filter(|l| l.session.is_some())?;
+        lastfm::counts(&track, played).then_some(async move { lastfm.scrobble(&track, started).await })
+    }
+
+    fn scrobble(&mut self) {
+        if let Some(scrobble) = self.finish_listening() {
+            self.spawn(async move {
+                scrobble.await?;
+                Ok(Msg::Done)
+            });
+        }
+    }
+
     fn play(&mut self, index: usize) {
         let Some(tidal) = self.tidal.clone() else { return };
+        // Reloading the same track in another quality is still the same listen.
+        if self.resume_at.is_none() {
+            self.scrobble();
+        }
         self.queue.index = Some(index);
         self.error = None;
         // The lyrics view never changes page, so drop the last track's big cover here.
@@ -406,6 +436,7 @@ impl App {
     }
 
     fn stop(&mut self) {
+        self.scrobble();
         self.queue.index = None;
         self.player.send(Cmd::Stop);
     }
@@ -476,6 +507,16 @@ impl App {
                 tidal.add_to_playlist(&playlist.id, track).await?;
                 Ok(Msg::Created(playlist))
             }),
+            Action::ConnectLastFm => match self.lastfm.clone() {
+                Some(lastfm) => {
+                    self.notice = Some("Approve Riptide in the Last.fm page that just opened".into());
+                    self.spawn(async move { Ok(Msg::LastFm(lastfm.connect().await?)) });
+                }
+                None => {
+                    let path = LastFm::path(self.session.parent().expect("data directory"));
+                    self.error = Some(format!("Add your Last.fm API key and secret to {} first", path.display()));
+                }
+            },
             Action::Toggle => self.player.send(Cmd::Toggle),
             Action::Next => self.next(),
             Action::Prev => self.prev(),
@@ -533,12 +574,28 @@ impl App {
                     if let Some(seconds) = self.resume_at.take() {
                         self.player.send(Cmd::Seek(seconds));
                     }
+                    if self.listening.is_none()
+                        && let Some(track) = self.queue.current().cloned()
+                    {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                        self.listening = Some((track.clone(), now));
+                        if let Some(lastfm) = self.lastfm.clone().filter(|l| l.session.is_some()) {
+                            self.spawn(async move {
+                                lastfm.now_playing(&track).await?;
+                                Ok(Msg::Done)
+                            });
+                        }
+                    }
                 }
                 Msg::Continue(..) | Msg::Ready(..) | Msg::Done => {}
                 Msg::Favorites(ids) => self.favorites = ids,
                 Msg::Folders(cards) => self.folders = cards,
                 Msg::Playlists(playlists) => self.playlists = playlists,
                 Msg::Notice(text) => self.notice = Some(text),
+                Msg::LastFm(lastfm) => {
+                    self.notice = lastfm.session.as_ref().map(|(_, user)| format!("Scrobbling to Last.fm as {user}"));
+                    self.lastfm = Some(lastfm);
+                }
                 Msg::Created(playlist) => {
                     self.notice = Some(format!("Added to {}", playlist.title));
                     self.folders.insert(0, Card::Playlist(playlist.clone()));
@@ -662,6 +719,11 @@ impl App {
                 if nav_item(ui, icon, text, open == Some(&source)).clicked() {
                     actions.push(Action::Open(source));
                 }
+            }
+            let scrobbling = self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| format!("Last.fm: {user}"));
+            let text = scrobbling.as_deref().unwrap_or("Connect Last.fm");
+            if nav_item(ui, Icon::Playing, text, false).on_hover_text("Scrobble what you play to Last.fm").clicked() {
+                actions.push(Action::ConnectLastFm);
             }
             heading(ui, "PLAYLISTS");
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -920,6 +982,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(scrobble) = self.finish_listening() {
+            let _ = self.rt.block_on(tokio::time::timeout(Duration::from_secs(3), scrobble));
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.receive();
         self.media_keys();
