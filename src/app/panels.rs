@@ -342,8 +342,8 @@ impl App {
                 ui.add_space(64.0);
                 let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
                 let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-                // The lyrics show in full beside the cover and its title, and fade out just above and
-                // below them; the playing line sits level with the middle of the cover.
+                // The lyrics fade out above the cover and toward its title below, so they stay beside the
+                // cover; the playing line sits level with its middle.
                 const FADE: f32 = 56.0;
                 let (column, lead) = (side + 70.0, top.min(FADE));
                 ui.vertical(|ui| {
@@ -352,7 +352,8 @@ impl App {
                         let from = ui.clip_rect().top() + lead;
                         let shown = |ui: &Ui, color: Color32| {
                             let y = ui.cursor().top() + 20.0;
-                            let f = (1.0 - (from - y).max(y - from - column).max(0.0) / FADE).clamp(0.0, 1.0);
+                            let below = (from + column - y) / (column * 0.22);
+                            let f = (1.0 - (from - y).max(0.0) / FADE).min(below).clamp(0.0, 1.0);
                             color.gamma_multiply(f * f * (3.0 - 2.0 * f))
                         };
                         ui.add_space(lead);
