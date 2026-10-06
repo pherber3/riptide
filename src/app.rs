@@ -93,6 +93,9 @@ enum Action {
     Shuffle,
     ShufflePlay(Vec<Track>),
     TrackRadio(u64),
+    PlayAlbum(u64),
+    PlayPlaylist(String),
+    PlayMix(String),
     ArtistRadio(u64),
     Lyrics,
     Repeat,
@@ -387,6 +390,9 @@ impl App {
                 self.play(0);
             }
             Action::TrackRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.track_radio(id).await?)) }),
+            Action::PlayAlbum(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.album(id).await?.1)) }),
+            Action::PlayPlaylist(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.playlist(&id).await?.1)) }),
+            Action::PlayMix(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.mix_tracks(&id).await?)) }),
             Action::ArtistRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.artist_radio(id).await?)) }),
             // Sorting by the current column again reverses it, as Tidal does.
             Action::Sort(sort) => {
@@ -485,7 +491,7 @@ impl App {
                 }
                 Msg::Ready(..) | Msg::Done => {}
                 Msg::Radio(tracks) if !tracks.is_empty() => self.apply(Action::Play(tracks, 0)),
-                Msg::Radio(_) => self.error = Some("No radio for this one.".into()),
+                Msg::Radio(_) => self.error = Some("Nothing to play here.".into()),
                 Msg::Continue(after, tracks) if self.current().is_some_and(|t| t.id == after) => {
                     let known: HashSet<u64> = self.queue.iter().map(|t| t.id).collect();
                     let before = self.queue.len();
@@ -658,12 +664,23 @@ impl App {
                 let track = self.index.and_then(|i| self.queue.get(i));
                 cols[0].horizontal_centered(|ui| {
                     if let Some(t) = track {
-                        picture(ui, art(t.cover.as_deref(), 160), 60.0, false);
+                        let cover = picture(ui, art(t.cover.as_deref(), 160), 60.0, false);
+                        if let Some(id) = t.album_id
+                            && cover.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                        {
+                            actions.push(Action::Album(id));
+                        }
                         ui.vertical(|ui| {
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 heart(ui, t.id, &self.favorites, actions);
-                                ui.add(egui::Label::new(RichText::new(&t.title).strong()).truncate());
+                                let title = egui::Label::new(RichText::new(&t.title).strong()).truncate().sense(Sense::click());
+                                let title = ui.add(title).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if let Some(id) = t.album_id
+                                    && title.on_hover_text(&t.album).clicked()
+                                {
+                                    actions.push(Action::Album(id));
+                                }
                             });
                             if let Some(id) = t.artist_id
                                 && ui.link(&t.artist).clicked()
@@ -794,7 +811,7 @@ impl App {
                         section(ui, &shelf.title);
                         if !shelf.cards.is_empty() {
                             egui::ScrollArea::horizontal().id_salt(("shelf", n)).show(ui, |ui| {
-                                ui.horizontal(|ui| actions.extend(shelf.cards.iter().filter_map(|c| home_card(ui, c))));
+                                ui.horizontal(|ui| shelf.cards.iter().for_each(|c| home_card(ui, c, actions)));
                             });
                         }
                         if !shelf.tracks.is_empty() {
@@ -1091,15 +1108,10 @@ fn entry_cards(ui: &mut Ui, entries: &[Entry], order: Option<&[usize]>, actions:
         for entry in ordered(entries, order) {
             match entry {
                 Entry::Folder { id, name, count } => {
-                    if card(ui, None, false, &format!("📁 {name}"), &format!("Folder · {count} playlists")) {
-                        actions.push(Action::Folder(id.clone(), name.clone()));
-                    }
+                    let (title, sub) = (format!("📁 {name}"), format!("Folder · {count} playlists"));
+                    card(ui, None, false, &title, &sub, Action::Folder(id.clone(), name.clone()), None, actions);
                 }
-                Entry::Playlist(p) => {
-                    if card(ui, art(p.cover.as_deref(), 320), false, &p.title, &format!("{} tracks", p.count)) {
-                        actions.push(Action::Playlist(p.id.clone()));
-                    }
-                }
+                Entry::Playlist(p) => playlist_card(ui, p, actions),
             }
         }
     });
@@ -1243,25 +1255,35 @@ fn art(id: Option<&str>, size: u32) -> Option<String> {
 
 /// Artwork, loaded only once it scrolls into view so long shelves and grids don't fill memory.
 fn picture(ui: &mut Ui, url: Option<String>, side: f32, round: bool) -> egui::Response {
-    let radius = if round { side / 2.0 } else { 4.0 };
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    paint_picture(ui, url, rect, round);
+    response
+}
+
+fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
+    let radius = if round { rect.width() / 2.0 } else { 4.0 };
     ui.painter().rect_filled(rect, radius, ui.visuals().faint_bg_color);
     if let Some(url) = url
         && ui.is_rect_visible(rect)
     {
         egui::Image::new(url).corner_radius(radius).paint_at(ui, rect);
     }
-    response
 }
 
-fn home_card(ui: &mut Ui, card_data: &Card) -> Option<Action> {
+fn home_card(ui: &mut Ui, card_data: &Card, actions: &mut Vec<Action>) {
     match card_data {
-        Card::Album(a) => card(ui, art(a.cover.as_deref(), 320), false, &a.title, &a.artist).then_some(Action::Album(a.id)),
-        Card::Artist(a) => card(ui, art(a.picture.as_deref(), 320), true, &a.name, "Artist").then_some(Action::Artist(a.id)),
-        Card::Playlist(p) => {
-            card(ui, art(p.cover.as_deref(), 320), false, &p.title, &format!("{} tracks", p.count)).then(|| Action::Playlist(p.id.clone()))
+        Card::Album(a) => {
+            let cover = art(a.cover.as_deref(), 320);
+            card(ui, cover, false, &a.title, &a.artist, Action::Album(a.id), Some(Action::PlayAlbum(a.id)), actions);
         }
-        Card::Mix(m) => card(ui, m.image.clone(), false, &m.title, &m.subtitle).then(|| Action::Mix(m.clone())),
+        Card::Artist(a) => {
+            let picture = art(a.picture.as_deref(), 320);
+            card(ui, picture, true, &a.name, "Artist", Action::Artist(a.id), Some(Action::ArtistRadio(a.id)), actions);
+        }
+        Card::Playlist(p) => playlist_card(ui, p, actions),
+        Card::Mix(m) => {
+            card(ui, m.image.clone(), false, &m.title, &m.subtitle, Action::Mix(m.clone()), Some(Action::PlayMix(m.id.clone())), actions);
+        }
     }
 }
 
@@ -1290,24 +1312,46 @@ fn header(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle
     start
 }
 
-fn card(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle: &str) -> bool {
-    let mut clicked = false;
-    ui.allocate_ui(vec2(160.0, 216.0), |ui| {
-        ui.vertical(|ui| {
-            clicked |= picture(ui, image, 160.0, round).clicked();
-            clicked |= ui.add(egui::Label::new(RichText::new(title).strong()).truncate().sense(Sense::click())).clicked();
-            ui.add(egui::Label::new(RichText::new(subtitle).weak()).truncate());
+const CARD: f32 = 160.0;
+
+/// Artwork with a title and subtitle. The whole card highlights on hover and opens on click;
+/// with a `play` action, a play button on the artwork plays it without opening.
+#[allow(clippy::too_many_arguments)]
+fn card(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle: &str, open: Action, play: Option<Action>, actions: &mut Vec<Action>) {
+    let pad = 8.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(CARD + 2.0 * pad, CARD + 2.0 * pad + 40.0), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, 6.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let cover = Rect::from_min_size(rect.min + vec2(pad, pad), vec2(CARD, CARD));
+    paint_picture(ui, image, cover, round);
+    let line = |text: RichText| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), CARD, egui::TextStyle::Body);
+    let color = ui.visuals().text_color();
+    ui.painter().galley(cover.left_bottom() + vec2(0.0, 6.0), line(RichText::new(title).strong()), color);
+    ui.painter().galley(cover.left_bottom() + vec2(0.0, 24.0), line(RichText::new(subtitle).weak()), color);
+    let button = cover.right_bottom() - vec2(24.0, 24.0);
+    let on_button = response.hover_pos().is_some_and(|p| p.distance(button) <= 18.0);
+    if hovered && play.is_some() {
+        ui.painter().circle_filled(button, 18.0, if on_button { ACCENT } else { Color32::from_gray(235) });
+        triangle(ui, button + vec2(1.5, 0.0), 7.0, Direction::Right, Color32::BLACK);
+    }
+    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        actions.push(match play {
+            Some(play) if on_button => play,
+            _ => open,
         });
-    });
-    clicked
+    }
 }
 
 fn album_cards(ui: &mut Ui, albums: &[Album], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         for a in ordered(albums, order) {
-            if card(ui, art(a.cover.as_deref(), 320), false, &a.title, &format!("{} · {}", a.artist, a.year)) {
-                actions.push(Action::Album(a.id));
-            }
+            let sub = format!("{} · {}", a.artist, a.year);
+            card(ui, art(a.cover.as_deref(), 320), false, &a.title, &sub, Action::Album(a.id), Some(Action::PlayAlbum(a.id)), actions);
         }
     });
 }
@@ -1315,21 +1359,19 @@ fn album_cards(ui: &mut Ui, albums: &[Album], order: Option<&[usize]>, actions: 
 fn artist_cards(ui: &mut Ui, artists: &[Artist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         for a in ordered(artists, order) {
-            if card(ui, art(a.picture.as_deref(), 320), true, &a.name, "Artist") {
-                actions.push(Action::Artist(a.id));
-            }
+            let picture = art(a.picture.as_deref(), 320);
+            card(ui, picture, true, &a.name, "Artist", Action::Artist(a.id), Some(Action::ArtistRadio(a.id)), actions);
         }
     });
 }
 
+fn playlist_card(ui: &mut Ui, p: &Playlist, actions: &mut Vec<Action>) {
+    let (cover, sub) = (art(p.cover.as_deref(), 320), format!("{} tracks", p.count));
+    card(ui, cover, false, &p.title, &sub, Action::Playlist(p.id.clone()), Some(Action::PlayPlaylist(p.id.clone())), actions);
+}
+
 fn playlist_cards(ui: &mut Ui, playlists: &[Playlist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
-    ui.horizontal_wrapped(|ui| {
-        for p in ordered(playlists, order) {
-            if card(ui, art(p.cover.as_deref(), 320), false, &p.title, &format!("{} tracks", p.count)) {
-                actions.push(Action::Playlist(p.id.clone()));
-            }
-        }
-    });
+    ui.horizontal_wrapped(|ui| ordered(playlists, order).for_each(|p| playlist_card(ui, p, actions)));
 }
 
 fn search_page(ui: &mut Ui, r: &Results, rows: &Rows<'_>, actions: &mut Vec<Action>) {
