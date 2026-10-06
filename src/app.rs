@@ -286,7 +286,7 @@ impl App {
                 ctx.request_repaint();
             }
         });
-        let controls = np::NowPlaying::start(np::App::new("tidalfast", "tidalfast"), {
+        let controls = np::NowPlaying::start(np::App::new("riptide", "Riptide"), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         });
@@ -585,7 +585,7 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
-                ui.label(RichText::new("tidalfast").font(bold(44.0)).color(TEXT));
+                ui.label(RichText::new("riptide").font(bold(44.0)).color(TEXT));
                 ui.label(RichText::new("Your Tidal library, light and fast").size(15.0).color(SECONDARY));
                 ui.add_space(32.0);
                 if self.busy {
@@ -634,7 +634,7 @@ impl App {
             };
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
-                ui.label(RichText::new("tidalfast").font(bold(20.0)).color(TEXT));
+                ui.label(RichText::new("riptide").font(bold(20.0)).color(TEXT));
             });
             ui.add_space(16.0);
             let search = matches!(open, Some(Source::Search(_)));

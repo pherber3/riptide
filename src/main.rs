@@ -23,6 +23,12 @@ use tidal::{Quality, Tidal};
 pub const CACHE_BYTES: u64 = 2 << 30;
 pub const ART_BYTES: u64 = 256 << 20;
 
+/// The window and taskbar icon.
+fn icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../assets/riptide.png")).expect("bundled icon").to_rgba8();
+    egui::IconData { width: image.width(), height: image.height(), rgba: image.into_raw() }
+}
+
 fn main() -> Result<()> {
     let dir = std::env::current_exe()?.parent().expect("exe has a directory").to_path_buf();
     let session = tidal::session_path(&dir);
@@ -31,12 +37,13 @@ fn main() -> Result<()> {
         [] => {
             let options = eframe::NativeOptions {
                 viewport: egui::ViewportBuilder::default()
-                    .with_title("tidalfast")
+                    .with_title("Riptide")
+                    .with_icon(icon())
                     .with_inner_size([1200.0, 800.0])
                     .with_min_inner_size([800.0, 500.0]),
                 ..Default::default()
             };
-            eframe::run_native("tidalfast", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir)?))))
+            eframe::run_native("riptide", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir)?))))
                 .map_err(|e| anyhow!("{e}"))?;
         }
         ["play", id, rest @ ..] => {
@@ -68,7 +75,7 @@ fn main() -> Result<()> {
             }
             println!();
         }
-        _ => eprintln!("usage: tidalfast [play <track-id> [low|high|max]]"),
+        _ => eprintln!("usage: riptide [play <track-id> [low|high|max]]"),
     }
     Ok(())
 }

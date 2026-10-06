@@ -33,7 +33,7 @@ pub fn bold(size: f32) -> FontId {
 
 fastframe_icons::icons! {
     pub enum Icon {
-        prefix: "tidalfast-icon-",
+        prefix: "riptide-icon-",
         directory: "../assets/icons/",
         Home => "house",
         Search => lucide "search",
