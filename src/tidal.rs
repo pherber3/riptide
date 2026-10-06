@@ -122,6 +122,14 @@ pub struct Mix {
     pub image: Option<String>,
 }
 
+/// An album, artist or playlist, as saved to the user's collection.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Item {
+    Album(u64),
+    Artist(u64),
+    Playlist(String),
+}
+
 /// Anything shown as a card: in a grid, on a shelf, or in a playlist folder.
 #[derive(Clone, Debug)]
 pub enum Card {
@@ -477,19 +485,67 @@ impl Tidal {
 
     /// Appends a track to one of the user's playlists. Tidal asks for the playlist's current version.
     pub async fn add_to_playlist(&self, playlist: &str, track: u64) -> Result<()> {
+        let form = [("trackIds", track.to_string()), ("onDupes", "SKIP".into()), ("onArtifactNotFound", "SKIP".into())];
+        self.edit(playlist, Method::POST, "/items", &[], &form).await
+    }
+
+    /// Removes the track at `index` (in the playlist's own order).
+    pub async fn remove_from_playlist(&self, playlist: &str, index: usize) -> Result<()> {
+        let query = [("order", "INDEX"), ("orderDirection", "ASC")];
+        self.edit(playlist, Method::DELETE, &format!("/items/{index}"), &query, &[]).await
+    }
+
+    pub async fn rename_playlist(&self, playlist: &str, title: &str) -> Result<()> {
+        self.edit(playlist, Method::POST, "", &[], &[("title", title.into())]).await
+    }
+
+    /// Changes one of the user's playlists. Tidal asks for the version being changed.
+    async fn edit(&self, playlist: &str, method: Method, path: &str, query: &[(&str, &str)], form: &[(&str, String)]) -> Result<()> {
         let url = format!("{V1}/playlists/{playlist}");
         let current = self.send(Method::GET, &url, &[], &[]).await?;
         let version = current.headers().get("etag").context("no playlist version")?.clone();
-        current.bytes().await?; // read to the end so the connection is reused for the POST
-        let form = [("trackIds", track.to_string()), ("onDupes", "SKIP".into()), ("onArtifactNotFound", "SKIP".into())];
-        let req = self.request(Method::POST, &format!("{url}/items"), &[]).await?;
-        req.header("If-None-Match", version).form(&form).send().await?.error_for_status()?;
+        current.bytes().await?; // read to the end so the connection is reused
+        let mut req = self.request(method, &format!("{url}{path}"), query).await?.header("If-None-Match", version);
+        if !form.is_empty() {
+            req = req.form(form);
+        }
+        req.send().await?.error_for_status()?;
         Ok(())
     }
 
-    pub async fn favorite_ids(&self) -> Result<HashSet<u64>> {
+    /// Changes the user's playlist folders: `remove` (a playlist the user made is deleted) or
+    /// `move` into a folder ("root" is the top level).
+    pub async fn arrange(&self, action: &str, playlist: &str, folder: Option<&str>) -> Result<()> {
+        let (url, trn) = (format!("{V2}/my-collection/playlists/folders/{action}"), format!("trn:playlist:{playlist}"));
+        let mut query = vec![("trns", trn.as_str())];
+        query.extend(folder.map(|f| ("folderId", f)));
+        self.send(Method::PUT, &url, &query, &[]).await.map(drop)
+    }
+
+    /// Saved track ids, and saved albums, artists and playlists.
+    pub async fn favorite_ids(&self) -> Result<(HashSet<u64>, HashSet<Item>)> {
         let v = self.get(&format!("{}/favorites/ids", self.user().await?), &[]).await?;
-        Ok(v["TRACK"].as_array().into_iter().flatten().filter_map(|id| id.as_str()?.parse().ok()).collect())
+        let ids = |kind: &str| v[kind].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>();
+        let numbers = |kind: &str| ids(kind).into_iter().filter_map(|id| id.parse().ok()).collect::<Vec<u64>>();
+        let mut saved: HashSet<Item> = numbers("ALBUM").into_iter().map(Item::Album).collect();
+        saved.extend(numbers("ARTIST").into_iter().map(Item::Artist));
+        saved.extend(ids("PLAYLIST").into_iter().map(Item::Playlist));
+        Ok((numbers("TRACK").into_iter().collect(), saved))
+    }
+
+    /// Saves an album, artist or playlist to the collection, or takes it out.
+    pub async fn set_saved(&self, item: &Item, on: bool) -> Result<()> {
+        let (kind, field, id) = match item {
+            Item::Album(id) => ("albums", "albumIds", id.to_string()),
+            Item::Artist(id) => ("artists", "artistIds", id.to_string()),
+            Item::Playlist(id) => ("playlists", "uuids", id.clone()),
+        };
+        let url = format!("{}/favorites/{kind}", self.user().await?);
+        match on {
+            true => self.send(Method::POST, &url, &[], &[(field, &id)]).await?,
+            false => self.send(Method::DELETE, &format!("{url}/{id}"), &[], &[]).await?,
+        };
+        Ok(())
     }
 
     pub async fn set_favorite(&self, id: u64, on: bool) -> Result<()> {

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use egui::{Align, Color32, Layout, Rect, Response, RichText, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 use crate::app::{Action, Body, Head, Page, Source};
-use crate::theme::{ACCENT, DIM, GOLD, HOVER, Icon, LINE, SECONDARY, SURFACE, TEXT, bold, medium, semibold};
-use crate::tidal::{self, Card, Playlist, Quality, Track};
+use crate::theme::{ACCENT, DANGER, DIM, GOLD, HOVER, Icon, LINE, SECONDARY, SURFACE, TEXT, bold, medium, semibold};
+use crate::tidal::{self, Card, Item, Playlist, Quality, Track};
 use crate::view::{Sort, View, in_order, ordered};
 
 const CARD: f32 = 168.0;
@@ -221,7 +221,7 @@ pub enum Start {
 }
 
 /// The page title, with big artwork when it has some, and Play / Shuffle (/ Radio) buttons.
-fn header(ui: &mut Ui, head: &Head, can_play: bool) -> Option<Start> {
+fn header(ui: &mut Ui, head: &Head, can_play: bool, rows: &Rows, actions: &mut Vec<Action>) -> Option<Start> {
     let mut start = None;
     let mut buttons = |ui: &mut Ui| {
         ui.horizontal(|ui| {
@@ -234,6 +234,29 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool) -> Option<Start> {
             }
             if head.radio.is_some() && pill(ui, Icon::Radio, "Radio", false).clicked() {
                 start = Some(Start::Radio);
+            }
+            match &head.item {
+                Some(Item::Playlist(id)) if rows.mine(id) => playlist_menu(ui, id, &head.title, rows.folders, actions),
+                // An artist is followed with a heart; an album or playlist is added to its list.
+                Some(item) => {
+                    let on = rows.saved.contains(item);
+                    let list = match item {
+                        Item::Album(_) => "Albums",
+                        Item::Playlist(_) => "Playlists",
+                        Item::Artist(_) => "Artists",
+                    };
+                    let icon = match (item, on) {
+                        (Item::Artist(_), true) => Icon::HeartFilled,
+                        (Item::Artist(_), false) => Icon::Heart,
+                        (_, true) => Icon::Check,
+                        (_, false) => Icon::Plus,
+                    };
+                    let hint = if on { format!("Remove from your {list}") } else { format!("Add to your {list}") };
+                    if icon_button(ui, icon, 22.0, if on { ACCENT } else { SECONDARY }).on_hover_text(hint).clicked() {
+                        actions.push(Action::Save(item.clone(), !on));
+                    }
+                }
+                None => {}
             }
         });
     };
@@ -267,6 +290,58 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool) -> Option<Start> {
     start
 }
 
+/// Rename, move or delete one of the user's own playlists.
+fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: &mut Vec<Action>) {
+    let more = egui::Button::image(Icon::More.image(SECONDARY, 22.0)).frame(false);
+    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
+        ui.set_min_width(220.0);
+        ui.spacing_mut().button_padding = vec2(12.0, 7.0);
+        ui.menu_button("Rename", |ui| {
+            if let Some(name) = name_entry(ui, egui::Id::new(("rename", id)), title, "Playlist name", "Rename") {
+                actions.push(Action::RenamePlaylist(id.into(), name));
+                ui.close();
+            }
+        });
+        ui.menu_button("Move to folder", |ui| {
+            let named = folders.iter().filter_map(|c| match c {
+                Card::Folder { id, name, .. } => Some((id.as_str(), name.as_str())),
+                _ => None,
+            });
+            for (folder, name) in std::iter::once((crate::app::ROOT, "Top level")).chain(named) {
+                if ui.button(name).clicked() {
+                    actions.push(Action::MovePlaylist(id.into(), folder.into()));
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Delete playlist", |ui| {
+            ui.label(RichText::new("This can't be undone.").color(SECONDARY));
+            if ui.button(RichText::new("Delete").color(DANGER)).clicked() {
+                actions.push(Action::DeletePlaylist(id.into()));
+                ui.close();
+            }
+        });
+    });
+}
+
+/// A name typed in a menu, kept in egui memory under `id` until it is submitted (Enter or the button).
+fn name_entry(ui: &mut Ui, id: egui::Id, initial: &str, hint: &str, submit: &str) -> Option<String> {
+    let stored: Option<String> = ui.data(|d| d.get_temp(id));
+    let fresh = stored.is_none();
+    let mut text = stored.unwrap_or_else(|| initial.into());
+    let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(216.0));
+    if fresh {
+        edit.request_focus();
+    }
+    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if (enter || ui.button(submit).clicked()) && !text.trim().is_empty() {
+        ui.data_mut(|d| d.remove::<String>(id));
+        return Some(text.trim().into());
+    }
+    ui.data_mut(|d| d.insert_temp(id, text));
+    None
+}
+
 fn filter_box(ui: &mut Ui, view: &mut View) {
     search_field(ui, &mut view.filter, "Filter", 240.0, egui::Id::new(("filter", view.key)));
 }
@@ -274,7 +349,7 @@ fn filter_box(ui: &mut Ui, view: &mut View) {
 /// One page: header, then its track table, card grid or shelves.
 pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>) {
     let Page { head, body, view, .. } = page;
-    let start = head.as_ref().and_then(|head| header(ui, head, !body.tracks().is_empty()));
+    let start = head.as_ref().and_then(|head| header(ui, head, !body.tracks().is_empty(), rows, actions));
     let mut order = None;
     match body {
         Body::Tracks { tracks, album_column } => {
@@ -348,10 +423,20 @@ pub struct Rows<'a> {
     pub playing: Option<u64>,
     pub favorites: &'a HashSet<u64>,
     pub playlists: &'a [Playlist],
+    pub saved: &'a HashSet<Item>,
+    /// Top-level folders and playlists, to move a playlist into.
+    pub folders: &'a [Card],
+    /// The id of the user's own playlist these rows are, whose tracks can be removed.
+    pub editing: Option<&'a str>,
     pub queue: bool,
 }
 
 impl Rows<'_> {
+    /// Whether the user made this playlist (and so can change it).
+    fn mine(&self, id: &str) -> bool {
+        self.playlists.iter().any(|p| p.id == id)
+    }
+
     /// A table of tracks under column headers, clickable to sort when `sorted` is set (sort, reversed).
     /// Click a title or a hovered number, or double-click a row, to play the list from there;
     /// right-click a row for more. Lists that span albums show each track's cover.
@@ -471,6 +556,9 @@ impl Rows<'_> {
             item(ui, actions, "Play next", Action::Enqueue(t.clone(), true));
             item(ui, actions, "Add to queue", Action::Enqueue(t.clone(), false));
         }
+        if let Some(playlist) = self.editing {
+            item(ui, actions, "Remove from this playlist", Action::RemoveFromPlaylist(playlist.into(), i));
+        }
         ui.menu_button("Add to playlist", |ui| self.add_to_playlist(ui, t.id, actions));
         let saved = self.favorites.contains(&t.id);
         let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
@@ -488,33 +576,16 @@ impl Rows<'_> {
     fn add_to_playlist(&self, ui: &mut Ui, track: u64, actions: &mut Vec<Action>) {
         ui.set_min_width(240.0);
         ui.spacing_mut().button_padding = vec2(12.0, 7.0);
-        let (new_id, filter_id) = (egui::Id::new("new playlist"), egui::Id::new("playlist filter"));
-        let mut name: Option<String> = ui.data(|d| d.get_temp(new_id));
-        match &mut name {
-            None => {
-                if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
-                    name = Some(String::new());
-                }
+        let (creating, filter_id) = (egui::Id::new("creating playlist"), egui::Id::new("playlist filter"));
+        if ui.data(|d| d.get_temp::<bool>(creating)).unwrap_or(false) {
+            if let Some(name) = name_entry(ui, egui::Id::new("new playlist"), "", "Playlist name", "Create and add") {
+                actions.push(Action::CreatePlaylist(name, track));
+                ui.data_mut(|d| d.remove::<bool>(creating));
+                ui.close();
             }
-            Some(text) => {
-                let edit = ui.add(egui::TextEdit::singleline(text).hint_text("Playlist name").desired_width(216.0));
-                if text.is_empty() && !edit.has_focus() {
-                    edit.request_focus();
-                }
-                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (enter || ui.button("Create and add").clicked()) && !text.trim().is_empty() {
-                    actions.push(Action::CreatePlaylist(text.trim().into(), track));
-                    name = None;
-                    ui.close();
-                }
-            }
+        } else if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
+            ui.data_mut(|d| d.insert_temp(creating, true));
         }
-        ui.data_mut(|d| match name {
-            Some(name) => {
-                d.insert_temp(new_id, name);
-            }
-            None => d.remove::<String>(new_id),
-        });
         ui.separator();
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
         ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Find a playlist").desired_width(216.0));

@@ -48,6 +48,8 @@ fastframe_icons::icons! {
         Forward => lucide "chevron-right",
         Down => lucide "chevron-down",
         Plus => lucide "plus",
+        More => lucide "ellipsis",
+        Check => lucide "check",
         Settings => lucide "settings",
         Heart => "heart",
         HeartFilled => "heart-filled",

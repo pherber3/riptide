@@ -16,15 +16,15 @@ use crate::decode::Decoder;
 use crate::lastfm::{self, LastFm};
 use crate::player::{Cmd, Event, Player};
 use crate::queue::{self, Queue, Repeat};
-use crate::tidal::{self, Card, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
+use crate::tidal::{self, Card, Item, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
 use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
-const SEARCH_PAUSE: f64 = 0.3;
-const ROOT: &str = "root";
+const SEARCH_PAUSE: f64 = 0.25;
+pub const ROOT: &str = "root";
 const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
 const NAME_SORTS: &[Sort] = &[Sort::Added, Sort::Title];
 
@@ -87,6 +87,8 @@ impl Source {
 /// A page's title, artwork (with whether it is round) and radio.
 pub struct Head {
     pub kind: &'static str,
+    /// What the header's heart saves, or for the user's own playlist, what its menu changes.
+    pub item: Option<Item>,
     pub title: String,
     pub subtitle: String,
     pub art: Option<(Option<String>, bool)>,
@@ -95,7 +97,7 @@ pub struct Head {
 
 impl Head {
     fn title(title: impl Into<String>) -> Option<Self> {
-        Some(Self { kind: "", title: title.into(), subtitle: String::new(), art: None, radio: None })
+        Some(Self { kind: "", item: None, title: title.into(), subtitle: String::new(), art: None, radio: None })
     }
 }
 
@@ -139,12 +141,12 @@ async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             let (album, list) = tidal.album(*id).await?;
             let subtitle = [album.artist.as_str(), &album.year].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
             let art = Some((art(album.cover.as_deref(), 640), false));
-            (Some(Head { kind: "ALBUM", title: album.title, subtitle, art, radio: None }), tracks(list, false))
+            (Some(Head { kind: "ALBUM", item: Some(Item::Album(*id)), title: album.title, subtitle, art, radio: None }), tracks(list, false))
         }
         Source::Artist(id) => {
             let (artist, top, albums) = tidal.artist(*id).await?;
             let art = Some((art(artist.picture.as_deref(), 480), true));
-            let head = Head { kind: "ARTIST", title: artist.name, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
+            let head = Head { kind: "ARTIST", item: Some(Item::Artist(*id)), title: artist.name, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
             let top = Shelf { title: "Top tracks".into(), cards: Vec::new(), tracks: top };
             let albums = Shelf { title: "Albums".into(), cards: albums.into_iter().map(Card::Album).collect(), tracks: Vec::new() };
             (Some(head), Body::Shelves(vec![top, albums]))
@@ -152,10 +154,10 @@ async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         Source::Playlist(id) => {
             let (playlist, list) = tidal.playlist(id).await?;
             let art = Some((art(playlist.cover.as_deref(), 640), false));
-            (Some(Head { kind: "PLAYLIST", title: playlist.title, subtitle: format!("{} tracks", playlist.count), art, radio: None }), tracks(list, true))
+            (Some(Head { kind: "PLAYLIST", item: Some(Item::Playlist(id.clone())), title: playlist.title, subtitle: format!("{} tracks", playlist.count), art, radio: None }), tracks(list, true))
         }
         Source::Mix(mix) => {
-            let head = Head { kind: "MIX", title: mix.title.clone(), subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), radio: None };
+            let head = Head { kind: "MIX", item: None, title: mix.title.clone(), subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), radio: None };
             (Some(head), tracks(tidal.mix_tracks(&mix.id).await?, true))
         }
         Source::Tracks => (Head::title("Tracks"), tracks(tidal.favorite_tracks().await?, true)),
@@ -183,7 +185,7 @@ enum Msg {
     /// Radio to keep playing after the queue's last track (whose id comes first).
     Continue(u64, Vec<Track>),
     Ready(u64, Box<Decoder>),
-    Favorites(HashSet<u64>),
+    Favorites((HashSet<u64>, HashSet<Item>)),
     Folders(Vec<Card>),
     Playlists(Vec<Playlist>),
     /// A playlist just made, with a track already in it.
@@ -213,6 +215,14 @@ pub enum Action {
     /// Make a playlist with this name and add a track to it.
     CreatePlaylist(String, u64),
     ConnectLastFm,
+    /// Save an album, artist or playlist to the collection, or take it out.
+    Save(Item, bool),
+    /// Remove the track at this index from one of the user's playlists.
+    RemoveFromPlaylist(String, usize),
+    RenamePlaylist(String, String),
+    /// Move a playlist into a folder (by id; ROOT is the top level).
+    MovePlaylist(String, String),
+    DeletePlaylist(String),
     DisconnectLastFm,
     /// Play through this output device, or the system default.
     Device(Option<String>),
@@ -264,6 +274,8 @@ pub struct App {
     query: String,
     queue: Queue,
     favorites: HashSet<u64>,
+    /// Saved albums, artists and playlists.
+    saved: HashSet<Item>,
     /// Top-level playlist folders and playlists, for the sidebar.
     folders: Vec<Card>,
     /// The user's own playlists, for "Add to playlist".
@@ -356,6 +368,7 @@ impl App {
             device,
             normalize,
             favorites: HashSet::new(),
+            saved: HashSet::new(),
             folders: Vec::new(),
             playlists: Vec::new(),
             notice: None,
@@ -588,6 +601,63 @@ impl App {
                 }
             }
             // A queue restored from last time starts where it was left.
+            Action::Save(item, on) => {
+                if on { self.saved.insert(item.clone()) } else { self.saved.remove(&item) };
+                self.spawn(async move {
+                    tidal.set_saved(&item, on).await?;
+                    // A saved playlist joins the sidebar.
+                    Ok(match item {
+                        Item::Playlist(_) => Msg::Folders(tidal.folder(ROOT).await?),
+                        _ => Msg::Done,
+                    })
+                });
+            }
+            Action::RemoveFromPlaylist(id, index) => {
+                if let Some(Page { source: Source::Playlist(open), body: Body::Tracks { tracks, .. }, .. }) = &mut self.page
+                    && *open == id
+                    && index < tracks.len()
+                {
+                    tracks.remove(index);
+                }
+                self.spawn(async move {
+                    tidal.remove_from_playlist(&id, index).await?;
+                    Ok(Msg::Done)
+                });
+            }
+            Action::RenamePlaylist(id, name) => {
+                if let Some(Page { source: Source::Playlist(open), head: Some(head), .. }) = &mut self.page
+                    && *open == id
+                {
+                    head.title = name.clone();
+                }
+                for p in self.playlists.iter_mut().chain(self.folders.iter_mut().filter_map(|c| match c {
+                    Card::Playlist(p) => Some(p),
+                    _ => None,
+                })) {
+                    if p.id == id {
+                        p.title = name.clone();
+                    }
+                }
+                self.spawn(async move {
+                    tidal.rename_playlist(&id, &name).await?;
+                    Ok(Msg::Notice(format!("Renamed to {name}")))
+                });
+            }
+            Action::MovePlaylist(id, folder) => self.spawn(async move {
+                tidal.arrange("move", &id, Some(&folder)).await?;
+                Ok(Msg::Folders(tidal.folder(ROOT).await?))
+            }),
+            Action::DeletePlaylist(id) => {
+                self.playlists.retain(|p| p.id != id);
+                self.folders.retain(|c| !matches!(c, Card::Playlist(p) if p.id == id));
+                if matches!(self.page.as_ref().map(|p| &p.source), Some(Source::Playlist(open)) if *open == id) {
+                    self.step(true);
+                }
+                self.spawn(async move {
+                    tidal.arrange("remove", &id, None).await?;
+                    Ok(Msg::Notice("Playlist deleted".into()))
+                });
+            }
             Action::Toggle => match (self.restored, self.queue.index) {
                 (Some(at), Some(i)) => {
                     self.resume_at = Some((at, true));
@@ -672,7 +742,7 @@ impl App {
                     }
                 }
                 Msg::Continue(..) | Msg::Ready(..) | Msg::Done => {}
-                Msg::Favorites(ids) => self.favorites = ids,
+                Msg::Favorites((tracks, saved)) => (self.favorites, self.saved) = (tracks, saved),
                 Msg::Folders(cards) => self.folders = cards,
                 Msg::Playlists(playlists) => self.playlists = playlists,
                 Msg::Notice(text) => self.notice = Some(text),
@@ -936,7 +1006,7 @@ impl App {
         if !self.queue_open {
             return;
         }
-        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: true };
+        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, saved: &self.saved, folders: &self.folders, editing: None, queue: true };
         let frame = egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(20, 0));
         egui::Panel::right("side").default_size(420.0).resizable(true).frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1015,7 +1085,19 @@ impl App {
     }
 
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: false };
+        let editing = match self.page.as_ref().map(|p| &p.source) {
+            Some(Source::Playlist(id)) if self.playlists.iter().any(|p| p.id == *id) => Some(id.clone()),
+            _ => None,
+        };
+        let rows = Rows {
+            playing: self.queue.current().map(|t| t.id),
+            favorites: &self.favorites,
+            playlists: &self.playlists,
+            saved: &self.saved,
+            folders: &self.folders,
+            editing: editing.as_deref(),
+            queue: false,
+        };
         let (quality, lastfm_user) = (self.quality, self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.clone()));
         let (device, normalize) = (self.device.clone(), self.normalize);
         let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 14, bottom: 0 });
