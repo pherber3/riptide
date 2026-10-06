@@ -50,6 +50,7 @@ fastframe_icons::icons! {
         Plus => lucide "plus",
         More => lucide "ellipsis",
         Check => lucide "check",
+        Close => lucide "x",
         Settings => lucide "settings",
         Heart => "heart",
         HeartFilled => "heart-filled",

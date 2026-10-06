@@ -296,12 +296,10 @@ fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: 
     egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
         ui.set_min_width(220.0);
         ui.spacing_mut().button_padding = vec2(12.0, 7.0);
-        ui.menu_button("Rename", |ui| {
-            if let Some(name) = name_entry(ui, egui::Id::new(("rename", id)), title, "Playlist name", "Rename") {
-                actions.push(Action::RenamePlaylist(id.into(), name));
-                ui.close();
-            }
-        });
+        if ui.button("Rename").clicked() {
+            actions.push(Action::PlaylistForm(Target::Rename(id.into()), title.into()));
+            ui.close();
+        }
         ui.menu_button("Move to folder", |ui| {
             let named = folders.iter().filter_map(|c| match c {
                 Card::Folder { id, name, .. } => Some((id.as_str(), name.as_str())),
@@ -324,22 +322,83 @@ fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: 
     });
 }
 
-/// A name typed in a menu, kept in egui memory under `id` until it is submitted (Enter or the button).
-fn name_entry(ui: &mut Ui, id: egui::Id, initial: &str, hint: &str, submit: &str) -> Option<String> {
-    let stored: Option<String> = ui.data(|d| d.get_temp(id));
-    let fresh = stored.is_none();
-    let mut text = stored.unwrap_or_else(|| initial.into());
-    let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(216.0));
-    if fresh {
-        edit.request_focus();
+/// An on/off switch.
+pub fn switch(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
+    let t = ui.ctx().animate_bool(response.id, on);
+    ui.painter().rect_filled(rect, 11.0, HOVER.lerp_to_gamma(ACCENT, t));
+    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, TEXT);
+    clickable(response)
+}
+
+/// What the playlist dialog is for: a new playlist (with a track to put in it), or renaming one.
+pub enum Target {
+    Create(Option<u64>),
+    Rename(String),
+}
+
+pub struct PlaylistForm {
+    pub target: Target,
+    pub title: String,
+    pub description: String,
+    pub public: bool,
+}
+
+/// The Create playlist (or Rename playlist) dialog, as Tidal has it. Some(true) when saved,
+/// Some(false) when closed.
+pub fn playlist_dialog(ctx: &egui::Context, form: &mut PlaylistForm) -> Option<bool> {
+    let creating = matches!(form.target, Target::Create(_));
+    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
+    let modal = egui::Modal::new(egui::Id::new("playlist dialog")).frame(frame).show(ctx, |ui| {
+        ui.set_width(460.0);
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(if creating { "Create playlist" } else { "Rename playlist" }).font(bold(22.0)).color(TEXT));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| close = icon_button(ui, Icon::Close, 18.0, SECONDARY).clicked());
+        });
+        ui.add_space(16.0);
+        let title = ui.add(egui::TextEdit::singleline(&mut form.title).hint_text("Title").font(medium(16.0)).margin(vec2(14.0, 12.0)).desired_width(f32::INFINITY));
+        if ui.ctx().memory(|m| m.focused().is_none()) {
+            title.request_focus();
+        }
+        let enter = title.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if creating {
+            ui.add_space(10.0);
+            let description = egui::TextEdit::multiline(&mut form.description).hint_text("Write a description").char_limit(500).desired_rows(4);
+            ui.add(description.margin(vec2(14.0, 12.0)).desired_width(f32::INFINITY));
+            ui.label(RichText::new(format!("{}/500 characters", form.description.chars().count())).size(12.0).color(DIM));
+            ui.add_space(12.0);
+            egui::Frame::new().fill(HOVER).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Make it public").font(semibold(15.0)).color(TEXT));
+                        ui.label(RichText::new("Your playlist will be visible on your profile and to anyone.").size(13.0).color(SECONDARY));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if switch(ui, form.public).clicked() {
+                            form.public = !form.public;
+                        }
+                    });
+                });
+            });
+        }
+        ui.add_space(16.0);
+        let ready = !form.title.trim().is_empty();
+        let save = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let button = egui::Button::new(RichText::new("Save").font(semibold(14.0)).color(Color32::BLACK)).fill(TEXT).corner_radius(20).min_size(vec2(88.0, 40.0));
+            ui.add_enabled(ready, button).clicked()
+        });
+        (close, ready && (save.inner || enter))
+    });
+    let (close, save) = modal.inner;
+    if save {
+        Some(true)
+    } else if close || modal.should_close() {
+        Some(false)
+    } else {
+        None
     }
-    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    if (enter || ui.button(submit).clicked()) && !text.trim().is_empty() {
-        ui.data_mut(|d| d.remove::<String>(id));
-        return Some(text.trim().into());
-    }
-    ui.data_mut(|d| d.insert_temp(id, text));
-    None
 }
 
 fn filter_box(ui: &mut Ui, view: &mut View) {
@@ -576,15 +635,10 @@ impl Rows<'_> {
     fn add_to_playlist(&self, ui: &mut Ui, track: u64, actions: &mut Vec<Action>) {
         ui.set_min_width(240.0);
         ui.spacing_mut().button_padding = vec2(12.0, 7.0);
-        let (creating, filter_id) = (egui::Id::new("creating playlist"), egui::Id::new("playlist filter"));
-        if ui.data(|d| d.get_temp::<bool>(creating)).unwrap_or(false) {
-            if let Some(name) = name_entry(ui, egui::Id::new("new playlist"), "", "Playlist name", "Create and add") {
-                actions.push(Action::CreatePlaylist(name, track));
-                ui.data_mut(|d| d.remove::<bool>(creating));
-                ui.close();
-            }
-        } else if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
-            ui.data_mut(|d| d.insert_temp(creating, true));
+        let filter_id = egui::Id::new("playlist filter");
+        if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
+            actions.push(Action::PlaylistForm(Target::Create(Some(track)), String::new()));
+            ui.close();
         }
         ui.separator();
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();

@@ -19,7 +19,7 @@ use crate::queue::{self, Queue, Repeat};
 use crate::tidal::{self, Card, Item, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
-use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
+use crate::widgets::{PlaylistForm, Target, Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
@@ -213,7 +213,8 @@ pub enum Action {
     /// Add a track to one of the user's playlists (by id).
     AddToPlaylist(String, u64),
     /// Make a playlist with this name and add a track to it.
-    CreatePlaylist(String, u64),
+    /// Open the playlist dialog for this, with this title filled in.
+    PlaylistForm(Target, String),
     ConnectLastFm,
     /// Save an album, artist or playlist to the collection, or take it out.
     Save(Item, bool),
@@ -278,6 +279,8 @@ pub struct App {
     saved: HashSet<Item>,
     /// Top-level playlist folders and playlists, for the sidebar.
     folders: Vec<Card>,
+    /// The Create / Rename playlist dialog, while it is open.
+    form: Option<PlaylistForm>,
     /// The user's own playlists, for "Add to playlist".
     playlists: Vec<Playlist>,
     notice: Option<String>,
@@ -371,6 +374,7 @@ impl App {
             saved: HashSet::new(),
             folders: Vec::new(),
             playlists: Vec::new(),
+            form: None,
             notice: None,
             queue_open: false,
             lyrics_open: false,
@@ -497,6 +501,24 @@ impl App {
         });
     }
 
+    /// Makes the playlist the dialog describes (adding its track), or renames one.
+    fn save_playlist(&mut self, form: PlaylistForm) {
+        let PlaylistForm { target, title, description, public } = form;
+        match target {
+            Target::Rename(id) => self.apply(Action::RenamePlaylist(id, title.trim().into())),
+            Target::Create(track) => {
+                let Some(tidal) = self.tidal.clone() else { return };
+                self.spawn(async move {
+                    let playlist = tidal.create_playlist(title.trim(), description.trim(), public).await?;
+                    if let Some(track) = track {
+                        tidal.add_to_playlist(&playlist.id, track).await?;
+                    }
+                    Ok(Msg::Created(playlist))
+                });
+            }
+        }
+    }
+
     /// The playing track's normalization, or none.
     fn apply_gain(&self) {
         let gain = self.queue.current().and_then(|t| t.gain).filter(|_| self.normalize);
@@ -570,11 +592,7 @@ impl App {
                     Ok(Msg::Notice(notice))
                 });
             }
-            Action::CreatePlaylist(name, track) => self.spawn(async move {
-                let playlist = tidal.create_playlist(&name).await?;
-                tidal.add_to_playlist(&playlist.id, track).await?;
-                Ok(Msg::Created(playlist))
-            }),
+            Action::PlaylistForm(target, title) => self.form = Some(PlaylistForm { target, title, description: String::new(), public: false }),
             Action::ConnectLastFm => match self.lastfm.clone() {
                 Some(lastfm) => {
                     self.notice = Some("Approve Riptide in the Last.fm page that just opened".into());
@@ -751,7 +769,7 @@ impl App {
                     self.lastfm = Some(lastfm);
                 }
                 Msg::Created(playlist) => {
-                    self.notice = Some(format!("Added to {}", playlist.title));
+                    self.notice = Some(format!("Created {}", playlist.title));
                     self.folders.insert(0, Card::Playlist(playlist.clone()));
                     self.playlists.insert(0, playlist);
                 }
@@ -874,7 +892,16 @@ impl App {
                     actions.push(Action::Open(source));
                 }
             }
-            heading(ui, "PLAYLISTS");
+            ui.add_space(22.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new("PLAYLISTS").font(semibold(11.0)).color(DIM));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, Icon::Plus, 16.0, SECONDARY).on_hover_text("Create playlist").clicked() {
+                        actions.push(Action::PlaylistForm(Target::Create(None), String::new()));
+                    }
+                });
+            });
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 for card in &self.folders {
                     let (icon, text, selected) = match card {
@@ -1225,6 +1252,16 @@ impl eframe::App for App {
             self.sidebar(ui, &mut actions);
             self.queue_panel(ui, &mut actions);
             self.content(ui, &mut actions);
+        }
+        if let Some(form) = &mut self.form {
+            match crate::widgets::playlist_dialog(ui.ctx(), form) {
+                Some(true) => {
+                    let form = self.form.take().expect("dialog is open");
+                    self.save_playlist(form);
+                }
+                Some(false) => self.form = None,
+                None => {}
+            }
         }
         for action in actions {
             self.apply(action);

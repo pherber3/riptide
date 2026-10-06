@@ -3,9 +3,9 @@ use std::path::Path;
 use egui::{Align, Layout, RichText, Ui};
 
 use crate::app::Action;
-use crate::theme::{ACCENT, HOVER, SECONDARY, SURFACE, TEXT, medium};
+use crate::theme::{SECONDARY, SURFACE, TEXT, medium};
 use crate::tidal::Quality;
-use crate::widgets::{section, tier_color};
+use crate::widgets::{section, switch, tier_color};
 
 /// What the settings page shows.
 pub struct State<'a> {
@@ -72,16 +72,6 @@ pub fn page(ui: &mut Ui, state: &State, actions: &mut Vec<Action>) {
             }
         });
     });
-}
-
-/// An on/off switch.
-fn switch(ui: &mut Ui, on: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
-    let t = ui.ctx().animate_bool(response.id, on);
-    ui.painter().rect_filled(rect, 11.0, HOVER.lerp_to_gamma(ACCENT, t));
-    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, TEXT);
-    crate::widgets::clickable(response)
 }
 
 fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
