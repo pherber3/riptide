@@ -24,11 +24,13 @@ pub struct Decoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track: u32,
+    downloaded: Box<dyn Fn() + Send + Sync>,
     pub info: Info,
 }
 
 impl Decoder {
     pub fn open(reader: Reader) -> Result<Self> {
+        let downloaded = Box::new(reader.waiter());
         let mss = MediaSourceStream::new(Box::new(reader), Default::default());
         let format = symphonia::default::get_probe()
             .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())?
@@ -43,10 +45,11 @@ impl Decoder {
         };
         let decoder = symphonia::default::get_codecs().make(p, &DecoderOptions::default())?;
         let track = track.id;
-        Ok(Self { format, decoder, track, info })
+        Ok(Self { format, decoder, track, downloaded, info })
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<()> {
+        (self.downloaded)();
         let to = SeekTo::Time { time: Time::from(seconds), track_id: Some(self.track) };
         self.format.seek(SeekMode::Coarse, to)?;
         self.decoder.reset();

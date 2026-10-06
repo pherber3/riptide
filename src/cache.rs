@@ -108,6 +108,15 @@ pub async fn track(tidal: &tokio::sync::Mutex<Tidal>, dir: &Path, id: u64, quali
 }
 
 impl Reader {
+    /// Blocks until the download has finished; seeking needs the full length.
+    pub fn waiter(&self) -> impl Fn() + Send + Sync + 'static {
+        let shared = self.shared.clone();
+        move || {
+            let (lock, cv) = &*shared;
+            drop(cv.wait_while(lock.lock().unwrap(), |p| !p.done).unwrap());
+        }
+    }
+
     fn wait_until(&self, ready: impl Fn(&Progress) -> bool) -> MutexGuard<'_, Progress> {
         let (lock, cv) = &*self.shared;
         cv.wait_while(lock.lock().unwrap(), |p| !ready(p) && !p.done).unwrap()
