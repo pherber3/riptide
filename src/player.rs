@@ -34,6 +34,8 @@ pub struct Status {
     pub volume: AtomicU32,
     /// The playing track's normalization scale, as f32 bits.
     gain: AtomicU32,
+    /// How loud the music last sent to the output was (RMS, before the volume), as f32 bits.
+    level: AtomicU32,
     played: AtomicU64,
     samples_per_second: AtomicU64,
     /// A seek waiting for the download to finish, as f64 bits (NaN when none).
@@ -53,6 +55,10 @@ impl Status {
 
     pub fn set_volume(&self, volume: f32) {
         self.volume.store(volume.to_bits(), Relaxed);
+    }
+
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Relaxed))
     }
 
     pub fn set_gain(&self, gain: f32) {
@@ -76,6 +82,7 @@ impl Player {
             playing: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
             gain: AtomicU32::new(1.0f32.to_bits()),
+            level: AtomicU32::new(0),
             played: AtomicU64::new(0),
             samples_per_second: AtomicU64::new(1),
             pending_seek: AtomicU64::new(f64::NAN.to_bits()),
@@ -107,14 +114,19 @@ impl Render for Sink {
         let Ok(mut rx) = self.rx.try_lock() else {
             return out.fill(0.0);
         };
-        let volume = f32::from_bits(self.status.volume.load(Relaxed)) * f32::from_bits(self.status.gain.load(Relaxed));
+        let gain = f32::from_bits(self.status.gain.load(Relaxed));
+        let volume = f32::from_bits(self.status.volume.load(Relaxed)) * gain;
         let n = rx.slots().min(out.len());
         if let Ok(chunk) = rx.read_chunk(n) {
             let (a, b) = chunk.as_slices();
+            let mut energy = 0.0;
             for (o, s) in out.iter_mut().zip(a.iter().chain(b)) {
                 *o = s * volume;
+                energy += s * s;
             }
             chunk.commit_all();
+            let level = if n > 0 { (energy / n as f32).sqrt() * gain } else { 0.0 };
+            self.status.level.store(level.to_bits(), Relaxed);
         }
         out[n..].fill(0.0);
         self.status.played.fetch_add(n as u64, Relaxed);

@@ -130,6 +130,8 @@ pub struct App {
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
+    /// How high the lyrics view's tide stands, 0 to 1, easing toward the music's loudness.
+    tide: f32,
     /// The seek bar's position while it is being dragged.
     dragging: Option<f64>,
     tray: Option<fastframe_tray::Tray>,
@@ -215,6 +217,7 @@ impl App {
             lyrics_open: false,
             lyrics: None,
             lyric_line: None,
+            tide: 0.0,
             dragging: None,
             hidden: false,
             quitting: false,

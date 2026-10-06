@@ -7,7 +7,7 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
 use crate::tidal::{self, Card, Item, Quality};
-use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
+use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tide, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -304,6 +304,18 @@ impl App {
         let (soft, faint) = (Color32::from_white_alpha(180), Color32::from_white_alpha(110));
         let frame = egui::Frame::new().fill(mood.unwrap_or(p().panel)).inner_margin(egui::Margin { left: 56, right: 40, top: 16, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            // The tide rises quickly with the music and ebbs slowly, then lies still once it stops.
+            let playing = self.player.status.playing.load(Relaxed);
+            let target = if playing { (self.player.status.level() * 3.0).min(1.0) } else { 0.0 };
+            let rate = if target > self.tide { 10.0 } else { 1.5 };
+            self.tide += (target - self.tide) * (1.0 - (-rate * ui.input(|i| i.stable_dt).min(0.1)).exp());
+            let full = ui.clip_rect();
+            let depth = (full.height() * 0.2).clamp(80.0, 180.0);
+            tide(ui, egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom() - depth), full.max), self.tide);
+            let minimized = ui.input(|i| i.viewport().minimized == Some(true));
+            if (playing || self.tide > 0.005) && !self.hidden && !minimized {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            }
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if icon_button(ui, Icon::Down, 24.0, soft).on_hover_text("Close (Esc)").clicked() {
                     actions.push(Action::Lyrics);
