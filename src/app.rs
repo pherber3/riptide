@@ -22,6 +22,8 @@ use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBA
 use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 const HISTORY: usize = 30;
+/// How long typing has to pause before searching, in seconds.
+const SEARCH_PAUSE: f64 = 0.3;
 const ROOT: &str = "root";
 const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
 const NAME_SORTS: &[Sort] = &[Sort::Added, Sort::Title];
@@ -277,6 +279,8 @@ pub struct App {
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
+    /// When to search for what's being typed (egui time), once typing pauses.
+    search_due: Option<f64>,
     /// Where the restored queue's current track was left, until it plays again.
     restored: Option<f64>,
     /// The window's last position and size while neither maximized nor minimized, and whether
@@ -346,6 +350,7 @@ impl App {
             query: String::new(),
             queue,
             restored,
+            search_due: None,
             window,
             maximized,
             device,
@@ -405,7 +410,11 @@ impl App {
     /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
     fn show(&mut self, mut page: Page) {
         page.view = page.source.sort_key().map(|key| View::new(key, self.sorts.get(key).copied().unwrap_or_default()));
-        if let Some(old) = self.page.replace(page) {
+        // Results that refine the ones showing replace them, so typing doesn't fill the history.
+        let refining = [Some(&page.source), self.page.as_ref().map(|p| &p.source)].iter().all(|s| matches!(s, Some(Source::Search(_))));
+        if refining {
+            self.page = Some(page);
+        } else if let Some(old) = self.page.replace(page) {
             self.back.push(old);
             if self.back.len() > HISTORY {
                 self.back.remove(0);
@@ -633,6 +642,8 @@ impl App {
                     self.spawn(async move { Ok(Msg::Folders(u.folder(ROOT).await?)) });
                     self.spawn(async move { Ok(Msg::Playlists(v.my_playlists().await?)) });
                 }
+                // Results for an older query than the one typed now arrived late: drop them.
+                Msg::Page(page) if matches!(&page.source, Source::Search(q) if q != self.query.trim()) => {}
                 Msg::Page(page) => self.show(*page),
                 Msg::Tracks(tracks) if !tracks.is_empty() => self.apply(Action::PlayTracks(tracks, 0)),
                 Msg::Tracks(_) => self.error = Some("Nothing to play here.".into()),
@@ -1024,8 +1035,11 @@ impl App {
                 }
                 ui.add_space(8.0);
                 let search = search_field(ui, &mut self.query, "Search", 340.0, egui::Id::new("search"));
-                if search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.query.trim().is_empty() {
-                    actions.push(Action::Open(Source::Search(self.query.trim().into())));
+                if search.changed() {
+                    self.search_due = Some(ui.input(|i| i.time) + SEARCH_PAUSE);
+                }
+                if search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    self.search_due = Some(0.0);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if icon_button(ui, Icon::Settings, 20.0, SECONDARY).on_hover_text("Settings").clicked() {
@@ -1069,6 +1083,20 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.receive();
+        // Search once typing pauses (or at Enter), unless those results are already showing.
+        if let Some(due) = self.search_due {
+            let now = ui.input(|i| i.time);
+            if now < due {
+                ui.ctx().request_repaint_after(Duration::from_secs_f64(due - now));
+            } else {
+                self.search_due = None;
+                let query = self.query.trim().to_string();
+                let showing = matches!(self.page.as_ref().map(|p| &p.source), Some(Source::Search(q)) if *q == query);
+                if !query.is_empty() && !showing {
+                    self.apply(Action::Open(Source::Search(query)));
+                }
+            }
+        }
         self.media_keys();
         ui.input(|i| {
             let v = i.viewport();

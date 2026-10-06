@@ -324,8 +324,22 @@ impl Tidal {
         let v = self.get(&format!("{V1}/search"), &[("query", query), ("types", types), ("limit", "20")]).await?;
         let shelf = |title: &str, cards: Vec<Card>, tracks| Shelf { title: title.into(), cards, tracks };
         let cards = |key: &str, parse: fn(&Value) -> Option<Card>| list(&v[key]["items"], parse);
+        // Tidal's best match: an artist, album or playlist gets a shelf of its own; a track goes first.
+        let hit = &v["topHit"]["value"];
+        let top = match v["topHit"]["type"].as_str() {
+            Some("ARTISTS") => artist(hit).map(Card::Artist),
+            Some("ALBUMS") => album(hit).map(Card::Album),
+            Some("PLAYLISTS") => playlist(hit).map(Card::Playlist),
+            _ => None,
+        };
+        let mut tracks = list(&v["tracks"]["items"], track);
+        if let Some(at) = tracks.iter().position(|t| Some(t.id) == hit["id"].as_u64()).filter(|_| v["topHit"]["type"] == "TRACKS") {
+            let first = tracks.remove(at);
+            tracks.insert(0, first);
+        }
         let shelves = [
-            shelf("Tracks", Vec::new(), list(&v["tracks"]["items"], track)),
+            shelf("Top result", top.into_iter().collect(), Vec::new()),
+            shelf("Tracks", Vec::new(), tracks),
             shelf("Artists", cards("artists", |v| artist(v).map(Card::Artist)), Vec::new()),
             shelf("Albums", cards("albums", |v| album(v).map(Card::Album)), Vec::new()),
             shelf("Playlists", cards("playlists", |v| playlist(v).map(Card::Playlist)), Vec::new()),
