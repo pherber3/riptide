@@ -14,7 +14,8 @@ const RING: usize = 192_000 * 2;
 /// Commands for the audio thread. It never waits on the network: decoders arrive already opened,
 /// and a seek into a track still downloading is held until the download is done.
 pub enum Cmd {
-    Load(Box<Decoder>),
+    /// A track to play from its start, playing or paused.
+    Load(Box<Decoder>, bool),
     Toggle,
     Seek(f64),
     Stop,
@@ -183,7 +184,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             _ => 1000,
         };
         match rx.recv_timeout(Duration::from_millis(timeout)) {
-            Ok(Cmd::Load(decoder)) => {
+            Ok(Cmd::Load(decoder, play)) => {
                 let i = &decoder.info;
                 let bits = i.bits.map_or(String::new(), |b| format!("{b}-bit "));
                 let tier = match (i.codec, i.bits, i.sample_rate) {
@@ -206,8 +207,8 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
                     pending_seek: None,
                 });
                 status.set_pending_seek(None);
-                status.playing.store(true, Relaxed);
-                output.resume();
+                status.playing.store(play, Relaxed);
+                if play { output.resume() } else { output.pause() }
             }
             Ok(Cmd::Toggle) if track.is_some() => {
                 let play = !status.playing.load(Relaxed);

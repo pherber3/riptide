@@ -9,6 +9,9 @@ use crate::tidal::{HTTP, Track};
 
 const API: &str = "https://ws.audioscrobbler.com/2.0/";
 
+/// One sender at a time for the scrobbles waiting in `scrobbles.json`.
+static SENDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Last.fm scrobbling with the user's own API account, kept in `data/lastfm.txt` as `key=`,
 /// `secret=`, and once connected `session=` and `user=` lines.
 #[derive(Clone)]
@@ -46,15 +49,15 @@ impl LastFm {
     }
 
     /// A signed API call: every parameter but `format`, sorted, then the secret, hashed.
-    async fn call(&self, method: &str, mut params: Vec<(&str, String)>, post: bool) -> Result<Value> {
-        params.extend([("method", method.into()), ("api_key", self.key.clone())]);
+    async fn call(&self, method: &str, mut params: Vec<(String, String)>, post: bool) -> Result<Value> {
+        params.extend([("method".into(), method.into()), ("api_key".into(), self.key.clone())]);
         if let Some((session, _)) = &self.session {
-            params.push(("sk", session.clone()));
+            params.push(("sk".into(), session.clone()));
         }
         params.sort();
         let signature: String = params.iter().map(|(k, v)| format!("{k}{v}")).collect::<String>() + &self.secret;
-        params.push(("api_sig", format!("{:x}", Md5::digest(signature))));
-        params.push(("format", "json".into()));
+        params.push(("api_sig".into(), format!("{:x}", Md5::digest(signature))));
+        params.push(("format".into(), "json".into()));
         let req = if post { HTTP.post(API).form(&params) } else { HTTP.get(API).query(&params) };
         let v: Value = req.send().await?.json().await?;
         if let Some(code) = v["error"].as_u64() {
@@ -71,7 +74,7 @@ impl LastFm {
         open::that(format!("https://www.last.fm/api/auth/?api_key={}&token={token}", self.key))?;
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(3)).await;
-            if let Ok(v) = self.call("auth.getSession", vec![("token", token.clone())], false).await {
+            if let Ok(v) = self.call("auth.getSession", vec![("token".into(), token.clone())], false).await {
                 let s = &v["session"];
                 self.session = Some((s["key"].as_str().context("no session")?.into(), s["name"].as_str().unwrap_or_default().into()));
                 self.save()?;
@@ -81,18 +84,43 @@ impl LastFm {
         bail!("Last.fm wasn't approved in time")
     }
 
-    fn track(t: &Track) -> Vec<(&'static str, String)> {
-        vec![("artist", t.artist.clone()), ("track", t.title.clone()), ("album", t.album.clone()), ("duration", t.duration.to_string())]
+    /// A track's parameters, with `suffix` after each name (`[0]` and so on in a batch).
+    fn track(t: &Track, suffix: &str) -> Vec<(String, String)> {
+        let fields = [("artist", t.artist.clone()), ("track", t.title.clone()), ("album", t.album.clone()), ("duration", t.duration.to_string())];
+        fields.into_iter().map(|(k, v)| (format!("{k}{suffix}"), v)).collect()
     }
 
     pub async fn now_playing(&self, t: &Track) -> Result<()> {
-        self.call("track.updateNowPlaying", Self::track(t), true).await.map(drop)
+        self.call("track.updateNowPlaying", Self::track(t, ""), true).await.map(drop)
     }
 
-    pub async fn scrobble(&self, t: &Track, started: u64) -> Result<()> {
-        let mut params = Self::track(t);
-        params.push(("timestamp", started.to_string()));
-        self.call("track.scrobble", params, true).await.map(drop)
+    /// Adds a listen (track and start time) to the scrobbles waiting on disk, then sends them all,
+    /// fifty at a time. Whatever isn't accepted stays for the next try, so a dropped connection or
+    /// a quit loses nothing.
+    pub async fn scrobble(&self, listen: Option<(&Track, u64)>) -> Result<()> {
+        let _sending = SENDING.lock().await;
+        let path = self.path.with_file_name("scrobbles.json");
+        let mut waiting: Vec<(Track, u64)> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        waiting.extend(listen.map(|(t, at)| (t.clone(), at)));
+        let mut result = Ok(());
+        while !waiting.is_empty() {
+            let batch = waiting.len().min(50);
+            let params = waiting[..batch].iter().enumerate().flat_map(|(i, (t, at))| {
+                let mut p = Self::track(t, &format!("[{i}]"));
+                p.push((format!("timestamp[{i}]"), at.to_string()));
+                p
+            });
+            if let Err(e) = self.call("track.scrobble", params.collect(), true).await {
+                result = Err(e);
+                break;
+            }
+            waiting.drain(..batch);
+        }
+        match waiting.is_empty() {
+            true => drop(std::fs::remove_file(&path)),
+            false => std::fs::write(&path, serde_json::to_vec(&waiting)?)?,
+        }
+        result
     }
 }
 

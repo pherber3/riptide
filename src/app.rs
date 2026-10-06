@@ -272,8 +272,8 @@ pub struct App {
     quality: Quality,
     volume: f32,
     dragging: Option<f64>,
-    /// Where to resume after reloading the current track in another quality.
-    resume_at: Option<f64>,
+    /// Where to pick the current track up once it loads, and whether it should be playing.
+    resume_at: Option<(f64, bool)>,
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
@@ -365,6 +365,13 @@ impl App {
             lastfm: LastFm::load(LastFm::path(&dir.join("data"))),
             listening: None,
         };
+        // Scrobbles left over from last time, if any.
+        if let Some(lastfm) = app.lastfm.clone().filter(|l| l.session.is_some()) {
+            app.spawn(async move {
+                lastfm.scrobble(None).await?;
+                Ok(Msg::Done)
+            });
+        }
         if app.busy {
             let session = app.session.clone();
             app.spawn(async move { Ok(Msg::SignedIn(Tidal::load(&session).await?)) });
@@ -423,7 +430,7 @@ impl App {
         let played = self.player.status.position();
         let (track, started) = self.listening.take()?;
         let lastfm = self.lastfm.clone().filter(|l| l.session.is_some())?;
-        lastfm::counts(&track, played).then_some(async move { lastfm.scrobble(&track, started).await })
+        lastfm::counts(&track, played).then_some(async move { lastfm.scrobble(Some((&track, started))).await })
     }
 
     fn scrobble(&mut self) {
@@ -574,7 +581,7 @@ impl App {
             // A queue restored from last time starts where it was left.
             Action::Toggle => match (self.restored, self.queue.index) {
                 (Some(at), Some(i)) => {
-                    self.resume_at = Some(at);
+                    self.resume_at = Some((at, true));
                     self.play(i);
                 }
                 _ => self.player.send(Cmd::Toggle),
@@ -601,8 +608,10 @@ impl App {
             Action::Quality(quality) => {
                 self.quality = quality;
                 self.save_settings();
-                if let Some(i) = self.queue.index {
-                    self.resume_at = Some(self.player.status.position());
+                // Reload the current track in the new quality, as it was: same spot, playing or
+                // paused. A track restored from last time isn't loaded yet, so it just waits.
+                if let (None, Some(i)) = (self.restored, self.queue.index) {
+                    self.resume_at = Some((self.player.status.position(), self.player.status.playing.load(Relaxed)));
                     self.play(i);
                 }
             }
@@ -633,8 +642,9 @@ impl App {
                 },
                 Msg::Ready(id, decoder) if self.queue.current().is_some_and(|t| t.id == id) => {
                     self.apply_gain();
-                    self.player.send(Cmd::Load(decoder));
-                    if let Some(seconds) = self.resume_at.take() {
+                    let (at, play) = self.resume_at.take().map_or((None, true), |(at, play)| (Some(at), play));
+                    self.player.send(Cmd::Load(decoder, play));
+                    if let Some(seconds) = at {
                         self.player.send(Cmd::Seek(seconds));
                     }
                     if self.listening.is_none()
