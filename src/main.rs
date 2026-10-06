@@ -4,6 +4,7 @@ mod app;
 mod art;
 mod cache;
 mod decode;
+mod fonts;
 mod player;
 mod tidal;
 

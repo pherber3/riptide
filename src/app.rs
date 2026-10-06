@@ -169,16 +169,8 @@ impl App {
         let cache = dir.join("cache");
         std::fs::create_dir_all(&cache)?;
         cache::evict(&cache, crate::CACHE_BYTES)?;
-        fastframe_fonts::FontSetup::default().system_fallbacks(false).install(&ctx);
-        std::thread::spawn({
-            let ctx = ctx.clone();
-            move || {
-                ctx.set_fonts(fastframe_fonts::FontSetup::default().definitions());
-                ctx.request_repaint();
-            }
-        });
-        egui_extras::install_image_loaders(&ctx);
-        ctx.add_bytes_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
+        crate::fonts::install(&ctx);
+        ctx.add_image_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
         let (tx, rx) = channel();
         let player = Player::start({
             let (tx, ctx) = (tx.clone(), ctx.clone());
