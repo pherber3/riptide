@@ -51,6 +51,8 @@ fastframe_icons::icons! {
         More => lucide "ellipsis",
         Check => lucide "check",
         Close => lucide "x",
+        Copy => lucide "copy",
+        Explore => "compass",
         Settings => lucide "settings",
         Heart => "heart",
         HeartFilled => "heart-filled",

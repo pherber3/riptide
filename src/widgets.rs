@@ -241,6 +241,11 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, rows: &Rows, actions: &mut V
             if head.radio.is_some() && pill(ui, Icon::Radio, "Radio", false).clicked() {
                 start = Some(Start::Radio);
             }
+            if let Some(item) = &head.item
+                && icon_button(ui, Icon::Copy, 20.0, SECONDARY).on_hover_text("Copy link").clicked()
+            {
+                actions.push(Action::CopyLink(link(item)));
+            }
             match &head.item {
                 Some(Item::Playlist(id)) if rows.mine(id) => playlist_menu(ui, id, &head.title, rows.folders, actions),
                 // An artist is followed with a heart; an album or playlist is added to its list.
@@ -456,7 +461,19 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
         Body::Settings => {}
         Body::Shelves(shelves) => {
             for (n, shelf) in shelves.iter().enumerate() {
-                section(ui, &shelf.title);
+                shelf_title(ui, &shelf.title, shelf.more.as_deref(), actions);
+                if !shelf.links.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        for (title, path) in &shelf.links {
+                            if chip(ui, title).clicked() {
+                                actions.push(Action::Open(Source::Page(path.clone())));
+                            }
+                        }
+                    });
+                }
+                if !shelf.text.is_empty() {
+                    about(ui, &shelf.text);
+                }
                 if !shelf.cards.is_empty() {
                     egui::ScrollArea::horizontal().id_salt(("shelf", n)).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -478,6 +495,84 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
         (Some(Start::Shuffle), _) => actions.push(Action::ShuffleTracks(tracks())),
         (Some(Start::Radio), Some(head)) => actions.extend(head.radio.clone().map(Action::Play)),
         _ => {}
+    }
+}
+
+/// A shelf's title, with "View all" on the right when there is more of it.
+fn shelf_title(ui: &mut Ui, title: &str, more: Option<&str>, actions: &mut Vec<Action>) {
+    if title.is_empty() && more.is_none() {
+        return ui.add_space(16.0);
+    }
+    ui.add_space(28.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(bold(22.0)).color(TEXT));
+        if let Some(more) = more {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if link_text(ui, RichText::new("View all").font(semibold(13.0)).color(SECONDARY)).clicked() {
+                    actions.push(Action::Open(Source::Page(more.into())));
+                }
+            });
+        }
+    });
+    ui.add_space(10.0);
+}
+
+/// A rounded link to another page, such as a genre.
+fn chip(ui: &mut Ui, text: &str) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.into(), medium(14.0), Color32::PLACEHOLDER);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(32.0, 18.0), Sense::click());
+    ui.painter().rect_filled(rect, rect.height() / 2.0, if response.hovered() { HOVER } else { SURFACE });
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, TEXT);
+    clickable(response)
+}
+
+/// A long paragraph (an artist's bio): the start, and the rest behind "Read more".
+fn about(ui: &mut Ui, text: &str) {
+    let id = ui.id().with("read more");
+    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let cut = text.char_indices().nth(600).map(|(at, _)| at).filter(|_| !open);
+    ui.scope(|ui| {
+        ui.set_max_width(820.0);
+        let shown = cut.map_or(text.to_string(), |at| format!("{}…", text[..at].trim_end()));
+        ui.label(RichText::new(shown).size(15.0).color(SECONDARY));
+    });
+    if cut.is_some() && link_text(ui, RichText::new("Read more").font(semibold(13.0)).color(TEXT)).clicked() {
+        ui.data_mut(|d| d.insert_temp(id, true));
+    }
+}
+
+/// Who made a track: Tidal's credits, role by role. Some(()) when closed.
+pub fn credits_dialog(ctx: &egui::Context, title: &str, credits: &[(String, String)]) -> bool {
+    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
+    let modal = egui::Modal::new(egui::Id::new("credits")).frame(frame).show(ctx, |ui| {
+        ui.set_width(440.0);
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(RichText::new(format!("Credits · {title}")).font(bold(20.0)).color(TEXT)).truncate());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| close = icon_button(ui, Icon::Close, 18.0, SECONDARY).clicked());
+        });
+        ui.add_space(12.0);
+        egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+            if credits.is_empty() {
+                ui.label(RichText::new("Tidal has no credits for this track.").color(SECONDARY));
+            }
+            for (role, names) in credits {
+                ui.label(RichText::new(role.to_uppercase()).font(semibold(11.0)).color(DIM));
+                ui.label(RichText::new(names).size(15.0).color(TEXT));
+                ui.add_space(10.0);
+            }
+        });
+        close
+    });
+    modal.inner || modal.should_close()
+}
+
+/// A Tidal web address for something, to share.
+pub fn link(item: &Item) -> String {
+    match item {
+        Item::Album(id) => format!("https://tidal.com/browse/album/{id}"),
+        Item::Artist(id) => format!("https://tidal.com/browse/artist/{id}"),
+        Item::Playlist(id) => format!("https://tidal.com/browse/playlist/{id}"),
     }
 }
 
@@ -573,8 +668,8 @@ impl Rows<'_> {
                                     actions.push(play());
                                 }
                             }
-                            Sort::Artist => link(ui, &t.artist, t.artist_id.map(Source::Artist), actions),
-                            Sort::Album => link(ui, &t.album, t.album_id.map(Source::Album), actions),
+                            Sort::Artist => link_to(ui, &t.artist, t.artist_id.map(Source::Artist), actions),
+                            Sort::Album => link_to(ui, &t.album, t.album_id.map(Source::Album), actions),
                             _ => {
                                 ui.label(RichText::new(t.added.as_deref().unwrap_or_default()).color(SECONDARY));
                             }
@@ -635,6 +730,8 @@ impl Rows<'_> {
         let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
         item(ui, actions, collection, Action::Favorite(t.id, !saved));
         item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
+        item(ui, actions, "Credits", Action::Credits(t.id, t.title.clone()));
+        item(ui, actions, "Copy link", Action::CopyLink(format!("https://tidal.com/browse/track/{}", t.id)));
         if let Some(id) = t.album_id {
             item(ui, actions, "Go to album", Action::Open(Source::Album(id)));
         }
@@ -670,7 +767,7 @@ impl Rows<'_> {
     }
 }
 
-fn link(ui: &mut Ui, text: &str, to: Option<Source>, actions: &mut Vec<Action>) {
+fn link_to(ui: &mut Ui, text: &str, to: Option<Source>, actions: &mut Vec<Action>) {
     if link_text(ui, RichText::new(text).color(SECONDARY)).clicked()
         && let Some(source) = to
     {

@@ -140,12 +140,48 @@ pub enum Card {
     Folder { id: String, name: String, count: u64 },
 }
 
-/// One row of the home page.
-#[derive(Clone, Debug)]
+/// One row of a browse page: cards, tracks, links to other pages, or a paragraph.
+#[derive(Clone, Debug, Default)]
 pub struct Shelf {
     pub title: String,
     pub cards: Vec<Card>,
     pub tracks: Vec<Track>,
+    /// Other pages, as (title, path for `Tidal::page`): genres, moods and so on.
+    pub links: Vec<(String, String)>,
+    /// The page with all of it ("View all").
+    pub more: Option<String>,
+    /// A paragraph, such as an artist's bio.
+    pub text: String,
+}
+
+impl Shelf {
+    fn named(title: impl Into<String>) -> Self {
+        Self { title: title.into(), ..Default::default() }
+    }
+
+    /// Adds an item of a feed or page by its type name (TRACK, ALBUM, ...).
+    fn add(&mut self, kind: &str, v: &Value) {
+        match kind {
+            "TRACK" => self.tracks.extend(track(v)),
+            "ALBUM" => self.cards.extend(album(v).map(Card::Album)),
+            "ARTIST" => self.cards.extend(artist(v).map(Card::Artist)),
+            "PLAYLIST" => self.cards.extend(playlist(v).map(Card::Playlist)),
+            "MIX" => self.cards.extend(mix(v).map(Card::Mix)),
+            _ => {}
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cards.is_empty() && self.tracks.is_empty() && self.links.is_empty() && self.text.is_empty()
+    }
+
+    pub fn tracks(title: &str, tracks: Vec<Track>) -> Self {
+        Self { tracks, ..Self::named(title) }
+    }
+
+    pub fn cards(title: &str, cards: Vec<Card>) -> Self {
+        Self { cards, ..Self::named(title) }
+    }
 }
 
 /// An image URL from a Tidal image id. Albums come in 80/160/320/640/1280, artists in 160/320/480/750.
@@ -330,7 +366,7 @@ impl Tidal {
     pub async fn search(&self, query: &str) -> Result<Vec<Shelf>> {
         let types = "ARTISTS,ALBUMS,TRACKS,PLAYLISTS";
         let v = self.get(&format!("{V1}/search"), &[("query", query), ("types", types), ("limit", "20")]).await?;
-        let shelf = |title: &str, cards: Vec<Card>, tracks| Shelf { title: title.into(), cards, tracks };
+        let shelf = |title: &str, cards: Vec<Card>, tracks| Shelf { cards, tracks, ..Shelf::named(title) };
         let cards = |key: &str, parse: fn(&Value) -> Option<Card>| list(&v[key]["items"], parse);
         // Tidal's best match: an artist, album or playlist gets a shelf of its own; a track goes first.
         let hit = &v["topHit"]["value"];
@@ -362,15 +398,31 @@ impl Tidal {
         Ok((album(&info).context("bad album")?, tracks))
     }
 
-    pub async fn artist(&self, id: u64) -> Result<(Artist, Vec<Track>, Vec<Album>)> {
+    /// An artist and their page: top tracks, releases by kind, similar artists and bio.
+    pub async fn artist(&self, id: u64) -> Result<(Artist, Vec<Shelf>)> {
         let url = format!("{V1}/artists/{id}");
-        let (top_url, albums_url) = (format!("{url}/toptracks"), format!("{url}/albums"));
-        let (info, top, albums) = tokio::try_join!(
+        let (top_url, albums_url, similar_url, bio_url) = (format!("{url}/toptracks"), format!("{url}/albums"), format!("{url}/similar"), format!("{url}/bio"));
+        const SINGLES: &[(&str, &str)] = &[("filter", "EPSANDSINGLES")];
+        const COMPILATIONS: &[(&str, &str)] = &[("filter", "COMPILATIONS")];
+        let releases = |filter| self.items(&albums_url, filter, 200, |v| album(v).map(Card::Album));
+        let (info, top, albums, singles, compilations, similar, bio) = tokio::join!(
             self.get(&url, &[]),
             self.get(&top_url, &[("limit", "10")]),
-            self.items(&albums_url, &[], 200, album)
-        )?;
-        Ok((artist(&info).context("bad artist")?, list(&top["items"], track), albums))
+            self.items(&albums_url, &[], 200, |v| album(v).map(Card::Album)),
+            releases(SINGLES),
+            releases(COMPILATIONS),
+            self.get(&similar_url, &[("limit", "20")]),
+            self.get(&bio_url, &[]),
+        );
+        let shelves = [
+            Shelf::tracks("Top tracks", top.map(|v| list(&v["items"], track)).unwrap_or_default()),
+            Shelf::cards("Albums", albums?),
+            Shelf::cards("EPs & Singles", singles.unwrap_or_default()),
+            Shelf::cards("Compilations", compilations.unwrap_or_default()),
+            Shelf::cards("Fans also like", similar.map(|v| list(&v["items"], |v| artist(v).map(Card::Artist))).unwrap_or_default()),
+            Shelf { text: bio.map(|v| plain(&text(&v["text"]))).unwrap_or_default(), ..Shelf::named("About") },
+        ];
+        Ok((artist(&info?).context("bad artist")?, shelves.into_iter().filter(|s| !s.is_empty()).collect()))
     }
 
     pub async fn playlist(&self, id: &str) -> Result<(Playlist, Vec<Track>)> {
@@ -384,21 +436,51 @@ impl Tidal {
     pub async fn home(&self) -> Result<Vec<Shelf>> {
         let feed = self.get(&format!("{V2}/home/feed/static"), &[("platform", "WEB"), ("limit", "20")]).await?;
         let shelves = feed["items"].as_array().into_iter().flatten().filter_map(|module| {
-            let mut shelf = Shelf { title: text(&module["title"]), cards: Vec::new(), tracks: Vec::new() };
+            let mut shelf = Shelf { more: module["viewAll"].as_str().map(Into::into), ..Shelf::named(text(&module["title"])) };
             for item in module["items"].as_array()? {
-                let data = &item["data"];
-                match item["type"].as_str()? {
-                    "TRACK" => shelf.tracks.extend(track(data)),
-                    "ALBUM" => shelf.cards.extend(album(data).map(Card::Album)),
-                    "ARTIST" => shelf.cards.extend(artist(data).map(Card::Artist)),
-                    "PLAYLIST" => shelf.cards.extend(playlist(data).map(Card::Playlist)),
-                    "MIX" => shelf.cards.extend(mix(data).map(Card::Mix)),
-                    _ => {}
-                }
+                shelf.add(item["type"].as_str()?, &item["data"]);
             }
             (!shelf.cards.is_empty() || !shelf.tracks.is_empty()).then_some(shelf)
         });
         Ok(shelves.collect())
+    }
+
+    /// A browse page and its title: a home row's "view all" (`home/...`), or one of Tidal's
+    /// editorial pages (`pages/...`), such as Explore, a genre or a mood.
+    pub async fn page(&self, path: &str) -> Result<(String, Vec<Shelf>)> {
+        if path.starts_with("home/") {
+            let v = self.get(&format!("{V2}/{path}"), &[("platform", "WEB"), ("limit", "50")]).await?;
+            let mut shelf = Shelf::default();
+            for item in v["items"].as_array().into_iter().flatten() {
+                shelf.add(item["type"].as_str().unwrap_or_default(), &item["data"]);
+            }
+            return Ok((text(&v["title"]), vec![shelf]));
+        }
+        let v = self.get(&format!("{V1}/{path}"), &[("deviceType", "BROWSER"), ("locale", "en_US")]).await?;
+        let modules = v["rows"].as_array().into_iter().flatten().flat_map(|row| row["modules"].as_array().into_iter().flatten());
+        let shelves = modules.filter_map(|m| {
+            let kind = m["type"].as_str()?;
+            let mut shelf = Shelf { more: m["showMore"]["apiPath"].as_str().map(Into::into), ..Shelf::named(text(&m["title"])) };
+            for item in m["pagedList"]["items"].as_array().or(m["items"].as_array())? {
+                match kind {
+                    "PAGE_LINKS_CLOUD" | "PAGE_LINKS" => shelf.links.extend(item["apiPath"].as_str().map(|p| (text(&item["title"]), p.into()))),
+                    "MIXED_TYPES_LIST" => shelf.add(item["type"].as_str().unwrap_or_default(), &item["item"]),
+                    _ => shelf.add(kind.trim_end_matches("_LIST"), item),
+                }
+            }
+            (!shelf.is_empty()).then_some(shelf)
+        });
+        Ok((text(&v["title"]), shelves.collect()))
+    }
+
+    /// Who made a track, as (role, names).
+    pub async fn credits(&self, id: u64) -> Result<Vec<(String, String)>> {
+        let v = self.get(&format!("{V1}/tracks/{id}/credits"), &[]).await?;
+        let role = |c: &Value| {
+            let names: Vec<String> = c["contributors"].as_array()?.iter().map(|p| text(&p["name"])).collect();
+            Some((text(&c["type"]), names.join(", ")))
+        };
+        Ok(v.as_array().into_iter().flatten().filter_map(role).collect())
     }
 
     pub async fn mix_tracks(&self, id: &str) -> Result<Vec<Track>> {
@@ -591,6 +673,18 @@ fn lrc(subtitles: &str) -> Vec<(f64, String)> {
 
 fn list<T>(v: &Value, parse: fn(&Value) -> Option<T>) -> Vec<T> {
     v.as_array().map_or_else(Vec::new, |a| a.iter().filter_map(parse).collect())
+}
+
+/// Tidal's text without its link markup (`[wimpLink artistId="1"]Name[/wimpLink]`).
+fn plain(marked: &str) -> String {
+    let mut out = String::with_capacity(marked.len());
+    let mut rest = marked;
+    while let Some(start) = [rest.find("[wimpLink"), rest.find("[/wimpLink]")].into_iter().flatten().min() {
+        out.push_str(&rest[..start]);
+        rest = rest[start..].split_once(']').map_or("", |(_, after)| after);
+    }
+    out.push_str(rest);
+    out.replace("<br/>", "\n")
 }
 
 fn text(v: &Value) -> String {

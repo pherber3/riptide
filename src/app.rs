@@ -45,6 +45,8 @@ pub enum Source {
     TrackRadio(u64),
     ArtistRadio(u64),
     Settings,
+    /// A browse page by its path: Explore, a genre, a "View all" (see `Tidal::page`).
+    Page(String),
 }
 
 impl Source {
@@ -144,12 +146,10 @@ async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             (Some(Head { kind: "ALBUM", item: Some(Item::Album(*id)), title: album.title, subtitle, art, radio: None }), tracks(list, false))
         }
         Source::Artist(id) => {
-            let (artist, top, albums) = tidal.artist(*id).await?;
+            let (artist, shelves) = tidal.artist(*id).await?;
             let art = Some((art(artist.picture.as_deref(), 480), true));
             let head = Head { kind: "ARTIST", item: Some(Item::Artist(*id)), title: artist.name, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
-            let top = Shelf { title: "Top tracks".into(), cards: Vec::new(), tracks: top };
-            let albums = Shelf { title: "Albums".into(), cards: albums.into_iter().map(Card::Album).collect(), tracks: Vec::new() };
-            (Some(head), Body::Shelves(vec![top, albums]))
+            (Some(head), Body::Shelves(shelves))
         }
         Source::Playlist(id) => {
             let (playlist, list) = tidal.playlist(id).await?;
@@ -171,6 +171,17 @@ async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         }
         Source::Folder(id, name) => (Head::title(name.clone()), Body::Grid { cards: tidal.folder(id).await?, sorts: NAME_SORTS }),
         Source::Settings => (Head::title("Settings"), Body::Settings),
+        Source::Page(path) => {
+            let (title, mut shelves) = tidal.page(path).await?;
+            // A page of one list ("View all") shows as a grid or a track list under that list's name.
+            let title = if title.is_empty() { shelves.first().map(|s| s.title.clone()).unwrap_or_default() } else { title };
+            let body = match shelves.as_mut_slice() {
+                [only] if only.tracks.is_empty() && only.links.is_empty() && !only.cards.is_empty() => Body::Grid { cards: std::mem::take(&mut only.cards), sorts: &[] },
+                [only] if only.cards.is_empty() && only.links.is_empty() && !only.tracks.is_empty() => tracks(std::mem::take(&mut only.tracks), true),
+                _ => Body::Shelves(shelves),
+            };
+            (Head::title(title), body)
+        }
         Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.radio("tracks", *id).await?, true)),
         Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.radio("artists", *id).await?, true)),
     };
@@ -190,6 +201,7 @@ enum Msg {
     Playlists(Vec<Playlist>),
     /// A playlist just made, with a track already in it.
     Created(Playlist),
+    Credits(String, Vec<(String, String)>),
     LastFm(LastFm),
     /// A short confirmation for the top bar.
     Notice(String),
@@ -216,6 +228,9 @@ pub enum Action {
     /// Open the playlist dialog for this, with this title filled in.
     PlaylistForm(Target, String),
     ConnectLastFm,
+    /// Show a track's credits (id and title).
+    Credits(u64, String),
+    CopyLink(String),
     /// Save an album, artist or playlist to the collection, or take it out.
     Save(Item, bool),
     /// Remove the track at this index from one of the user's playlists.
@@ -282,6 +297,8 @@ pub struct App {
     saved: HashSet<Item>,
     /// Top-level playlist folders and playlists, for the sidebar.
     folders: Vec<Card>,
+    /// A track's credits (title, then role and names), while they are shown.
+    credits: Option<(String, Vec<(String, String)>)>,
     /// The Create / Rename playlist dialog, while it is open.
     form: Option<PlaylistForm>,
     /// The user's own playlists, for "Add to playlist".
@@ -378,6 +395,7 @@ impl App {
             folders: Vec::new(),
             playlists: Vec::new(),
             form: None,
+            credits: None,
             notice: None,
             queue_open: false,
             lyrics_open: false,
@@ -595,6 +613,11 @@ impl App {
                     Ok(Msg::Notice(notice))
                 });
             }
+            Action::Credits(id, title) => self.spawn(async move { Ok(Msg::Credits(title, tidal.credits(id).await?)) }),
+            Action::CopyLink(link) => {
+                self.ctx.copy_text(link);
+                self.notice = Some("Link copied".into());
+            }
             Action::PlaylistForm(target, title) => self.form = Some(PlaylistForm { target, title, description: String::new(), public: false }),
             Action::ConnectLastFm => match self.lastfm.clone() {
                 Some(lastfm) => {
@@ -771,6 +794,7 @@ impl App {
                     self.notice = lastfm.session.as_ref().map(|(_, user)| format!("Scrobbling to Last.fm as {user}"));
                     self.lastfm = Some(lastfm);
                 }
+                Msg::Credits(title, credits) => self.credits = Some((title, credits)),
                 Msg::Created(playlist) => {
                     self.notice = Some(format!("Created {}", playlist.title));
                     self.folders.insert(0, Card::Playlist(playlist.clone()));
@@ -884,7 +908,13 @@ impl App {
             });
             ui.add_space(16.0);
             let search = matches!(open, Some(Source::Search(_)));
-            for (icon, text, selected, action) in [(Icon::Home, "Home", open == Some(&Source::Home), Action::Open(Source::Home)), (Icon::Search, "Search", search, Action::FocusSearch)] {
+            let explore = Source::Page("pages/explore".into());
+            let top = [
+                (Icon::Home, "Home", open == Some(&Source::Home), Action::Open(Source::Home)),
+                (Icon::Explore, "Explore", open == Some(&explore), Action::Open(explore.clone())),
+                (Icon::Search, "Search", search, Action::FocusSearch),
+            ];
+            for (icon, text, selected, action) in top {
                 if nav_item(ui, icon, text, selected).clicked() {
                     actions.push(action);
                 }
@@ -1293,6 +1323,11 @@ impl eframe::App for App {
             self.content(ui, &mut actions);
         }
         self.drag_label(ui.ctx());
+        if let Some((title, credits)) = &self.credits
+            && crate::widgets::credits_dialog(ui.ctx(), title, credits)
+        {
+            self.credits = None;
+        }
         if let Some(form) = &mut self.form {
             match crate::widgets::playlist_dialog(ui.ctx(), form) {
                 Some(true) => {
