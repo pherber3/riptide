@@ -397,13 +397,12 @@ impl App {
     pub(super) fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let frame = egui::Frame::new().fill(p().window).inner_margin(egui::Margin { left: 28, right: 16, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            // The page's artwork colour, glowing down from the top.
+            // The page's artwork colour glows down from the top and scrolls away with the page. It is
+            // drawn first, behind everything, once the scroll position is known.
+            let glow = ui.painter().add(egui::Shape::Noop);
             let cover = self.page.as_ref().and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());
-            if let Some(color) = cover.and_then(crate::art::tint) {
-                let full = ui.clip_rect();
-                let rect = egui::Rect::from_min_size(full.min, vec2(full.width(), 460.0));
-                ui.painter().add(egui::Shape::gradient_rect(rect, egui::Direction::TopDown, [color.gamma_multiply(0.6), Color32::TRANSPARENT]));
-            }
+            let tint = cover.and_then(crate::art::tint);
+            let full = ui.clip_rect();
             ui.horizontal(|ui| {
                 for (icon, enabled, back) in [(Icon::Back, !self.back.is_empty(), true), (Icon::Forward, !self.forward.is_empty(), false)] {
                     if ui.add_enabled_ui(enabled, |ui| icon_button(ui, icon, 20.0, p().secondary)).inner.clicked() {
@@ -440,12 +439,16 @@ impl App {
             let Some(page) = &mut self.page else { return };
             let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, editing: editing.as_deref(), queue: false };
             let (settings, home) = (&mut self.settings, self.data.parent().unwrap_or(&self.data));
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 crate::widgets::page(ui, page, &rows, actions);
                 if matches!(page.body, Body::Settings) {
                     crate::settings::page(ui, settings, &self.themes, lastfm_user.as_deref(), home, actions);
                 }
             });
+            if let Some(color) = tint {
+                let rect = egui::Rect::from_min_size(full.min - vec2(0.0, scrolled.state.offset.y), vec2(full.width(), 460.0));
+                ui.painter().set(glow, egui::Shape::gradient_rect(rect, egui::Direction::TopDown, [color.gamma_multiply(0.6), Color32::TRANSPARENT]));
+            }
         });
     }
 }
