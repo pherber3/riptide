@@ -53,7 +53,7 @@ pub fn link_text(ui: &mut Ui, text: RichText) -> Response {
 /// An icon that brightens to white on hover when it rests grey.
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, color: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size + 10.0), Sense::click());
-    let color = if response.hovered() && [SECONDARY, DIM].contains(&color) { TEXT } else { color };
+    let color = if response.hovered() { color.lerp_to_gamma(Color32::WHITE, 0.5) } else { color };
     icon.image(color, size).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
     clickable(response)
 }
@@ -91,9 +91,10 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, id: 
 /// A thin slider drawn like a progress bar, with a knob while hovered or dragged.
 pub fn bar(ui: &mut Ui, value: &mut f64, max: f64, width: f32, enabled: bool) -> Response {
     let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 16.0), sense);
+    let (rect, mut response) = ui.allocate_exact_size(vec2(width, 16.0), sense);
     if let Some(p) = response.interact_pointer_pos() {
         *value = f64::from(((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0)) * max;
+        response.mark_changed();
     }
     let active = enabled && (response.hovered() || response.dragged());
     let track = Rect::from_center_size(rect.center(), vec2(width, 4.0));
@@ -109,6 +110,9 @@ pub fn bar(ui: &mut Ui, value: &mut f64, max: f64, width: f32, enabled: bool) ->
 /// A sidebar entry, filled when selected or hovered.
 pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
     let hovered = response.hovered();
     if selected || hovered {
         ui.painter().rect_filled(rect, 8.0, if selected { HOVER } else { SURFACE });
@@ -150,22 +154,19 @@ fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
     }
 }
 
-/// A colour fading down into the background, behind the top of a page.
-pub fn glow(ui: &Ui, rect: Rect, color: Color32) {
-    let mut mesh = egui::Mesh::default();
-    for (corner, color) in [(rect.left_top(), color), (rect.right_top(), color), (rect.left_bottom(), Color32::TRANSPARENT), (rect.right_bottom(), Color32::TRANSPARENT)] {
-        mesh.colored_vertex(corner, color);
-    }
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(1, 2, 3);
-    ui.painter().add(mesh);
+/// The sorted column's small arrow, pointing up or down.
+fn arrow(ui: &Ui, c: egui::Pos2, up: bool) {
+    let (tip, base) = if up { (-3.0, 2.0) } else { (3.0, -2.0) };
+    let points = vec![c + vec2(-4.0, base), c + vec2(4.0, base), c + vec2(0.0, tip)];
+    ui.painter().add(egui::Shape::convex_polygon(points, ACCENT, Stroke::NONE));
 }
 
-/// A small filled triangle pointing up or down, for the sorted column.
-fn arrow(ui: &Ui, c: egui::Pos2, size: f32, up: bool, fill: Color32) {
-    let (tip, base) = if up { (-size * 0.75, size / 2.0) } else { (size * 0.75, -size / 2.0) };
-    let points = vec![c + vec2(-size, base), c + vec2(size, base), c + vec2(0.0, tip)];
-    ui.painter().add(egui::Shape::convex_polygon(points, fill, Stroke::NONE));
+/// The white round play (or pause) button, a little bigger while hovered.
+pub fn play_disc(ui: &Ui, center: egui::Pos2, radius: f32, hovered: bool, icon: Icon) {
+    let (radius, fill) = if hovered { (radius + 1.0, Color32::WHITE) } else { (radius, TEXT) };
+    ui.painter().circle_filled(center, radius, fill);
+    let nudge = if icon == Icon::Play { 1.0 } else { 0.0 };
+    icon.image(Color32::BLACK, 16.0).paint_at(ui, Rect::from_center_size(center + vec2(nudge, 0.0), Vec2::splat(16.0)));
 }
 
 /// Artwork with a title and subtitle. The whole card highlights on hover and opens on click; a play
@@ -202,8 +203,7 @@ fn card(ui: &mut Ui, card: &Card, actions: &mut Vec<Action>) {
     let on_button = play.is_some() && response.hover_pos().is_some_and(|p| p.distance(button) <= 20.0);
     if hovered && play.is_some() {
         painter.circle_filled(button + vec2(0.0, 2.0), 21.0, Color32::from_black_alpha(90));
-        painter.circle_filled(button, if on_button { 21.0 } else { 20.0 }, if on_button { Color32::WHITE } else { TEXT });
-        Icon::Play.image(Color32::BLACK, 16.0).paint_at(ui, Rect::from_center_size(button + vec2(1.0, 0.0), Vec2::splat(16.0)));
+        play_disc(ui, button, 20.0, on_button, Icon::Play);
     }
     if clickable(response).clicked() {
         actions.push(match play {
@@ -501,7 +501,7 @@ fn column_header(ui: &mut Ui, name: &str, sort: Sort, sorted: Option<(Sort, bool
         ui.label(text.color(if active { TEXT } else { DIM }));
         if active {
             let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-            arrow(ui, rect.center(), 4.0, reverse, ACCENT);
+            arrow(ui, rect.center(), reverse);
         }
     });
     if clickable(ui.interact(header.response.rect, ui.id().with(name), Sense::click())).clicked() {

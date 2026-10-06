@@ -18,7 +18,7 @@ use crate::queue::{self, Queue, Repeat};
 use crate::tidal::{self, Card, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
-use crate::widgets::{Rows, art, bar, clickable, clock, glow, heart, icon_button, link_text, nav_item, picture, pill, search_field, section, tier_color};
+use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 const HISTORY: usize = 30;
 const ROOT: &str = "root";
@@ -168,12 +168,6 @@ async fn load(tidal: Tidal, source: Source) -> Result<Page> {
     Ok(Page { source, head, body, view: None })
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Side {
-    Queue,
-    Lyrics,
-}
-
 enum Msg {
     SignedIn(Tidal),
     Page(Box<Page>),
@@ -216,7 +210,10 @@ pub enum Action {
     /// Back (true) or forward through history.
     Step(bool),
     Quality(Quality),
-    Side(Side),
+    /// Show or hide the queue panel.
+    Queue,
+    /// Open or close the full-window lyrics.
+    Lyrics,
     FocusSearch,
 }
 
@@ -255,7 +252,8 @@ pub struct App {
     /// The user's own playlists, for "Add to playlist".
     playlists: Vec<Playlist>,
     notice: Option<String>,
-    side: Option<Side>,
+    queue_open: bool,
+    lyrics_open: bool,
     quality: Quality,
     volume: f32,
     dragging: Option<f64>,
@@ -320,7 +318,8 @@ impl App {
             folders: Vec::new(),
             playlists: Vec::new(),
             notice: None,
-            side: None,
+            queue_open: false,
+            lyrics_open: false,
             quality,
             volume,
             dragging: None,
@@ -362,7 +361,7 @@ impl App {
         }
         self.forward.clear();
         self.loading = false;
-        self.ctx.forget_all_images();
+        crate::art::forget(&self.ctx);
     }
 
     /// Steps through history like a browser.
@@ -370,7 +369,7 @@ impl App {
         let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
         if let Some(page) = from.pop() {
             to.extend(self.page.replace(page));
-            self.ctx.forget_all_images();
+            crate::art::forget(&self.ctx);
         }
     }
 
@@ -378,6 +377,10 @@ impl App {
         let Some(tidal) = self.tidal.clone() else { return };
         self.queue.index = Some(index);
         self.error = None;
+        // The lyrics view never changes page, so drop the last track's big cover here.
+        if self.lyrics_open {
+            crate::art::forget(&self.ctx);
+        }
         let (dir, quality) = (self.cache.clone(), self.quality);
         let id = self.queue.tracks[index].id;
         let next = self.queue.tracks.get(index + 1).map(|t| t.id);
@@ -396,12 +399,6 @@ impl App {
             let decoder = tokio::task::spawn_blocking(move || Decoder::open(reader)).await??;
             Ok(Msg::Ready(id, Box::new(decoder)))
         });
-    }
-
-    fn close_lyrics(&mut self) {
-        if self.side == Some(Side::Lyrics) {
-            self.side = None;
-        }
     }
 
     fn stop(&mut self) {
@@ -431,7 +428,7 @@ impl App {
         match action {
             Action::Open(source) => {
                 (self.loading, self.error, self.notice) = (true, None, None);
-                self.close_lyrics();
+                self.lyrics_open = false;
                 self.spawn(async move { Ok(Msg::Page(Box::new(load(tidal, source).await?))) });
             }
             Action::Play(source) => self.spawn(async move { Ok(Msg::Tracks(load(tidal, source).await?.body.tracks().to_vec())) }),
@@ -486,7 +483,7 @@ impl App {
                 }
             }
             Action::Step(back) => {
-                self.close_lyrics();
+                self.lyrics_open = false;
                 self.step(back);
             }
             Action::Quality(quality) => {
@@ -497,7 +494,8 @@ impl App {
                     self.play(i);
                 }
             }
-            Action::Side(side) => (self.side, self.lyric_line) = ((self.side != Some(side)).then_some(side), None),
+            Action::Queue => self.queue_open = !self.queue_open,
+            Action::Lyrics => (self.lyrics_open, self.lyric_line) = (!self.lyrics_open, None),
             Action::FocusSearch => self.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search"))),
         }
     }
@@ -639,11 +637,11 @@ impl App {
                 ui.label(RichText::new("tidalfast").font(bold(20.0)).color(TEXT));
             });
             ui.add_space(16.0);
-            if nav_item(ui, Icon::Home, "Home", open == Some(&Source::Home)).clicked() {
-                actions.push(Action::Open(Source::Home));
-            }
-            if nav_item(ui, Icon::Search, "Search", matches!(open, Some(Source::Search(_)))).clicked() {
-                actions.push(Action::FocusSearch);
+            let search = matches!(open, Some(Source::Search(_)));
+            for (icon, text, selected, action) in [(Icon::Home, "Home", open == Some(&Source::Home), Action::Open(Source::Home)), (Icon::Search, "Search", search, Action::FocusSearch)] {
+                if nav_item(ui, icon, text, selected).clicked() {
+                    actions.push(action);
+                }
             }
             heading(ui, "COLLECTION");
             for (icon, text, source) in [(Icon::Music, "Tracks", Source::Tracks), (Icon::Disc, "Albums", Source::Albums), (Icon::Artists, "Artists", Source::Artists), (Icon::Playlists, "Playlists", Source::playlists())] {
@@ -654,11 +652,9 @@ impl App {
             heading(ui, "PLAYLISTS");
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 for card in &self.folders {
-                    let (icon, text, selected) = match (card, open) {
-                        (Card::Folder { id, name, .. }, Some(Source::Folder(open, _))) => (Icon::Folder, name, open == id),
-                        (Card::Folder { name, .. }, _) => (Icon::Folder, name, false),
-                        (Card::Playlist(p), Some(Source::Playlist(open))) => (Icon::Playlists, &p.title, *open == p.id),
-                        (Card::Playlist(p), _) => (Icon::Playlists, &p.title, false),
+                    let (icon, text, selected) = match card {
+                        Card::Folder { id, name, .. } => (Icon::Folder, name, matches!(open, Some(Source::Folder(o, _)) if o == id)),
+                        Card::Playlist(p) => (Icon::Playlists, &p.title, matches!(open, Some(Source::Playlist(o)) if *o == p.id)),
                         _ => continue,
                     };
                     let mut response = nav_item(ui, icon, text, selected);
@@ -676,7 +672,7 @@ impl App {
     fn player_bar(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
         let status = self.player.status.clone();
         let mut save = false;
-        let frame = egui::Frame::new().fill(mood.map_or(BAR, |c| shade(c, 0.75))).inner_margin(egui::Margin::symmetric(16, 0));
+        let frame = egui::Frame::new().fill(mood.map_or(BAR, |c| c.lerp_to_gamma(Color32::BLACK, 0.25))).inner_margin(egui::Margin::symmetric(16, 0));
         egui::Panel::bottom("player").exact_size(84.0).frame(frame).show(ui, |ui| {
             let edge = ui.clip_rect();
             ui.painter().hline(edge.x_range(), edge.top(), egui::Stroke::new(1.0, LINE));
@@ -712,26 +708,26 @@ impl App {
                         ui.spacing_mut().item_spacing.x = 14.0;
                         ui.add_space((ui.available_width() - 200.0) / 2.0);
                         let on = |on: bool| if on { ACCENT } else { SECONDARY };
-                        if icon_button(ui, Icon::Shuffle, 16.0, on(self.queue.shuffled())).clicked() {
-                            actions.push(Action::Shuffle);
-                        }
-                        if icon_button(ui, Icon::Prev, 18.0, TEXT).clicked() {
-                            actions.push(Action::Prev);
-                        }
-                        let playing = status.playing.load(Relaxed);
-                        let (rect, toggle) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
-                        ui.painter().circle_filled(rect.center(), if toggle.hovered() { 18.0 } else { 17.0 }, TEXT);
-                        let (icon, nudge) = if playing { (Icon::Pause, 0.0) } else { (Icon::Play, 1.0) };
-                        icon.image(Color32::BLACK, 16.0).paint_at(ui, egui::Rect::from_center_size(rect.center() + vec2(nudge, 0.0), Vec2::splat(16.0)));
-                        if clickable(toggle).clicked() {
-                            actions.push(Action::Toggle);
-                        }
-                        if icon_button(ui, Icon::Next, 18.0, TEXT).clicked() {
-                            actions.push(Action::Next);
-                        }
+                        let toggle = if status.playing.load(Relaxed) { Icon::Pause } else { Icon::Play };
                         let repeat = if self.queue.repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat };
-                        if icon_button(ui, repeat, 16.0, on(self.queue.repeat != Repeat::Off)).clicked() {
-                            actions.push(Action::Repeat);
+                        let buttons = [
+                            (Icon::Shuffle, 16.0, on(self.queue.shuffled()), Action::Shuffle),
+                            (Icon::Prev, 18.0, TEXT, Action::Prev),
+                            (toggle, 18.0, TEXT, Action::Toggle),
+                            (Icon::Next, 18.0, TEXT, Action::Next),
+                            (repeat, 16.0, on(self.queue.repeat != Repeat::Off), Action::Repeat),
+                        ];
+                        for (icon, size, color, action) in buttons {
+                            let response = if matches!(action, Action::Toggle) {
+                                let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+                                play_disc(ui, rect.center(), 17.0, response.hovered(), icon);
+                                clickable(response)
+                            } else {
+                                icon_button(ui, icon, size, color)
+                            };
+                            if response.clicked() {
+                                actions.push(action);
+                            }
                         }
                     });
                     let total = track.map_or(0.0, |t| f64::from(t.duration));
@@ -753,17 +749,16 @@ impl App {
                 cols[2].with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let mut volume = f64::from(self.volume);
                     let slider = bar(ui, &mut volume, 1.0, 96.0, true);
-                    if volume as f32 != self.volume {
+                    if slider.changed() {
                         self.volume = volume as f32;
                         status.set_volume(self.volume * self.volume);
                     }
                     save = slider.drag_stopped() || slider.clicked();
                     ui.add(if self.volume > 0.0 { Icon::Volume } else { Icon::Muted }.image(SECONDARY, 18.0));
                     ui.add_space(6.0);
-                    for (side, icon, hint) in [(Side::Queue, Icon::Queue, "Queue"), (Side::Lyrics, Icon::Lyrics, "Lyrics")] {
-                        let color = if self.side == Some(side) { ACCENT } else { SECONDARY };
-                        if icon_button(ui, icon, 18.0, color).on_hover_text(hint).clicked() {
-                            actions.push(Action::Side(side));
+                    for (open, icon, hint, action) in [(self.queue_open, Icon::Queue, "Queue", Action::Queue), (self.lyrics_open, Icon::Lyrics, "Lyrics", Action::Lyrics)] {
+                        if icon_button(ui, icon, 18.0, if open { ACCENT } else { SECONDARY }).on_hover_text(hint).clicked() {
+                            actions.push(action);
                         }
                     }
                     ui.add_space(6.0);
@@ -790,7 +785,7 @@ impl App {
 
     /// The queue, beside the page.
     fn queue_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        if self.side != Some(Side::Queue) {
+        if !self.queue_open {
             return;
         }
         let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: true };
@@ -813,7 +808,7 @@ impl App {
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if icon_button(ui, Icon::Down, 24.0, soft).on_hover_text("Close (Esc)").clicked() {
-                    actions.push(Action::Side(Side::Lyrics));
+                    actions.push(Action::Lyrics);
                 }
             });
             let Some(t) = self.queue.current() else {
@@ -879,7 +874,8 @@ impl App {
             let cover = self.page.as_ref().and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());
             if let Some(color) = cover.and_then(crate::art::tint) {
                 let full = ui.clip_rect();
-                glow(ui, egui::Rect::from_min_size(full.min, vec2(full.width(), 460.0)), color.gamma_multiply(0.6));
+                let rect = egui::Rect::from_min_size(full.min, vec2(full.width(), 460.0));
+                ui.painter().add(egui::Shape::gradient_rect(rect, egui::Direction::TopDown, [color.gamma_multiply(0.6), Color32::TRANSPARENT]));
             }
             ui.horizontal(|ui| {
                 for (icon, enabled, back) in [(Icon::Back, !self.back.is_empty(), true), (Icon::Forward, !self.forward.is_empty(), false)] {
@@ -922,8 +918,8 @@ impl eframe::App for App {
             if i.key_pressed(Key::Space) && !typing {
                 actions.push(Action::Toggle);
             }
-            if i.key_pressed(Key::Escape) && self.side == Some(Side::Lyrics) {
-                actions.push(Action::Side(Side::Lyrics));
+            if i.key_pressed(Key::Escape) && self.lyrics_open {
+                actions.push(Action::Lyrics);
             }
             // The mouse's side buttons, Alt+arrows and the keyboard's Back key, as in a web browser.
             let alt = |key| i.modifiers.alt && i.key_pressed(key);
@@ -934,7 +930,7 @@ impl eframe::App for App {
                 actions.push(Action::Step(false));
             }
         });
-        if self.side == Some(Side::Lyrics)
+        if self.lyrics_open
             && let (Some(id), Some(tidal)) = (self.queue.current().map(|t| t.id), self.tidal.clone())
             && self.lyrics.as_ref().is_none_or(|(loaded, _)| *loaded != id)
         {
@@ -942,11 +938,10 @@ impl eframe::App for App {
             self.spawn(async move { Ok(Msg::Lyrics(id, tidal.lyrics(id).await?)) });
         }
         // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
-        let lyrics_open = self.side == Some(Side::Lyrics);
-        let cover = self.queue.current().filter(|_| lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
+        let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
         let mood = cover.and_then(|url| crate::art::tint(&url));
         self.player_bar(ui, mood, &mut actions);
-        if lyrics_open {
+        if self.lyrics_open {
             self.now_playing(ui, mood, &mut actions);
         } else {
             self.sidebar(ui, &mut actions);
@@ -956,18 +951,14 @@ impl eframe::App for App {
         for action in actions {
             self.apply(action);
         }
-        // The clock moves once a second; lyrics need finer steps.
+        // The clock moves once a second; open lyrics also wake for their next line.
         if self.player.status.playing.load(Relaxed) {
-            let step = if self.side == Some(Side::Lyrics) { 250 } else { 1000 };
-            ui.ctx().request_repaint_after(Duration::from_millis(step));
+            let position = self.player.status.position();
+            let lyrics = self.lyrics.as_ref().and_then(|(_, l)| l.as_ref()).filter(|_| self.lyrics_open);
+            let next_line = lyrics.and_then(|l| l.synced.iter().find(|(at, _)| *at > position)).map(|(at, _)| at - position);
+            ui.ctx().request_repaint_after(Duration::from_secs_f64(next_line.unwrap_or(1.0).clamp(0.02, 1.0)));
         }
     }
-}
-
-/// A colour scaled darker (below 1) or lighter.
-fn shade(color: Color32, by: f32) -> Color32 {
-    let [r, g, b, _] = color.to_array().map(|c| (f32::from(c) * by).min(255.0) as u8);
-    Color32::from_rgb(r, g, b)
 }
 
 fn settings_path(session: &Path) -> PathBuf {

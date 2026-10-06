@@ -13,7 +13,7 @@ enum Entry {
 
 /// Loads Tidal artwork through a disk cache, decoding off the UI thread. Each decoded image is
 /// handed to egui's texture cache once and then dropped, so memory holds only the textures of
-/// what is on screen (the app forgets all images on every page change).
+/// what is on screen (the app forgets them on every page change).
 pub struct Art {
     dir: PathBuf,
     rt: tokio::runtime::Handle,
@@ -27,11 +27,19 @@ impl Art {
     }
 }
 
-/// The colour of each large (header) artwork decoded, for the glow behind its page.
+/// Every artwork decoded since the last `forget`, with its colour for the glow behind its page.
 static TINTS: LazyLock<Mutex<HashMap<String, Color32>>> = LazyLock::new(Default::default);
+/// Downloads at once, so scrolling a long list doesn't queue hundreds against the track stream.
+static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(6);
 
 pub fn tint(uri: &str) -> Option<Color32> {
     TINTS.lock().unwrap().get(uri).copied()
+}
+
+/// Drops all artwork textures (but not the icons, which egui would have to rasterize again).
+pub fn forget(ctx: &egui::Context) {
+    let uris: Vec<String> = TINTS.lock().unwrap().drain().map(|(uri, _)| uri).collect();
+    uris.iter().for_each(|uri| ctx.forget_image(uri));
 }
 
 /// The artwork's average colour, weighted toward its most colourful pixels and set to one
@@ -84,7 +92,11 @@ impl ImageLoader for Art {
             let cached = path.clone();
             let mut image = tokio::task::spawn_blocking(move || decode(&std::fs::read(cached).ok()?)).await.ok().flatten();
             if image.is_none()
-                && let Ok(bytes) = async { http.get(&uri).send().await?.error_for_status()?.bytes().await }.await
+                && let Ok(bytes) = async {
+                    let _permit = FETCHES.acquire().await;
+                    http.get(&uri).send().await?.error_for_status()?.bytes().await
+                }
+                .await
             {
                 image = tokio::task::spawn_blocking(move || {
                     let _ = std::fs::write(&path, &bytes);
@@ -94,7 +106,7 @@ impl ImageLoader for Art {
                 .ok()
                 .flatten();
             }
-            if let Some(image) = image.as_ref().filter(|i| i.width() >= 480) {
+            if let Some(image) = &image {
                 TINTS.lock().unwrap().insert(uri.clone(), mood(image));
             }
             let entry = image.map_or(Entry::Failed, |image| Entry::Ready(Arc::new(image)));

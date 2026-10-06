@@ -266,11 +266,11 @@ impl Tidal {
 
     async fn request(&self, method: Method, url: &str, query: &[(&str, &str)]) -> Result<reqwest::RequestBuilder> {
         let (token, country, _) = self.auth().await?;
-        let req = HTTP.request(method, url).bearer_auth(token).query(&[("countryCode", country.as_str())]).query(query);
-        Ok(match url.starts_with(V2) {
-            true => req.header("x-tidal-client-version", "2026.1.5").query(&[("locale", "en_US"), ("deviceType", "BROWSER")]),
-            false => req,
-        })
+        let mut req = HTTP.request(method, url).bearer_auth(token).query(&[("countryCode", country.as_str())]).query(query);
+        if url.starts_with(V2) {
+            req = req.header("x-tidal-client-version", "2026.1.5").query(&[("locale", "en_US"), ("deviceType", "BROWSER")]);
+        }
+        Ok(req)
     }
 
     async fn send(&self, method: Method, url: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
@@ -455,6 +455,7 @@ impl Tidal {
         let url = format!("{V1}/playlists/{playlist}");
         let current = self.send(Method::GET, &url, &[], &[]).await?;
         let version = current.headers().get("etag").context("no playlist version")?.clone();
+        current.bytes().await?; // read to the end so the connection is reused for the POST
         let form = [("trackIds", track.to_string()), ("onDupes", "SKIP".into()), ("onArtifactNotFound", "SKIP".into())];
         let req = self.request(Method::POST, &format!("{url}/items"), &[]).await?;
         req.header("If-None-Match", version).form(&form).send().await?.error_for_status()?;
