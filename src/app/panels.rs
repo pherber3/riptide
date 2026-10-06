@@ -336,14 +336,16 @@ impl App {
                 ui.add_space(64.0);
                 let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
                 let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-                // The lyrics fade out above the cover and toward its title below, so they stay beside the
-                // cover; the playing line sits level with its middle.
-                const FADE: f32 = 56.0;
-                let (column, lead) = (side + 70.0, top.min(FADE));
+                // The lyrics stay beside the cover and its title, the playing line level with their middle.
+                let column = side + 70.0;
                 ui.vertical(|ui| {
-                    ui.add_space(top - lead);
-                    scroll.max_height(column + 2.0 * lead).show(ui, |ui| {
-                        let from = ui.clip_rect().top() + lead;
+                    ui.add_space(top);
+                    scroll.max_height(column).show(ui, |ui| {
+                        let from = ui.clip_rect().top();
+                        // The same fade at both ends; the top one slides in as the lyrics scroll, so
+                        // the first line starts in full beside the cover's top.
+                        let fade = column * 0.22;
+                        let unscrolled = (fade - (from - ui.cursor().top())).max(0.0);
                         // Laid out without a colour and painted in the one for where it lands, so the
                         // fade never re-shapes the text.
                         let lyric = |ui: &mut Ui, text: RichText, color: Color32| {
@@ -351,12 +353,11 @@ impl App {
                             let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
                             if ui.is_rect_visible(rect) {
                                 let y = rect.center().y;
-                                let f = (1.0 - (from - y).max(0.0) / FADE).min((from + column - y) / (column * 0.22)).clamp(0.0, 1.0);
+                                let f = ((y - from + unscrolled) / fade).min((from + column - y) / fade).clamp(0.0, 1.0);
                                 ui.painter().galley(rect.min, galley, color.gamma_multiply(f * f * (3.0 - 2.0 * f)));
                             }
                             response
                         };
-                        ui.add_space(lead);
                         match lyrics {
                             None => {
                                 ui.spinner();
