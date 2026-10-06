@@ -46,6 +46,7 @@ fastframe_icons::icons! {
         Lyrics => lucide "mic",
         Back => lucide "chevron-left",
         Forward => lucide "chevron-right",
+        Down => lucide "chevron-down",
         Heart => "heart",
         HeartFilled => "heart-filled",
         Play => "play-filled",

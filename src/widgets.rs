@@ -4,7 +4,7 @@ use egui::{Align, Color32, Layout, Rect, Response, RichText, Sense, Stroke, Ui, 
 
 use crate::app::{Action, Body, Head, Page, Source};
 use crate::theme::{ACCENT, DIM, GOLD, HOVER, Icon, LINE, SECONDARY, SURFACE, TEXT, bold, medium, semibold};
-use crate::tidal::{self, Card, Quality, Track};
+use crate::tidal::{self, Card, Playlist, Quality, Track};
 use crate::view::{Sort, View, in_order, ordered};
 
 const CARD: f32 = 168.0;
@@ -346,6 +346,7 @@ fn cell(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui)) {
 pub struct Rows<'a> {
     pub playing: Option<u64>,
     pub favorites: &'a HashSet<u64>,
+    pub playlists: &'a [Playlist],
     pub queue: bool,
 }
 
@@ -464,6 +465,18 @@ impl Rows<'_> {
         }
         if let Some(id) = t.artist_id {
             item("Go to artist", Action::Open(Source::Artist(id)));
+        }
+        if !self.playlists.is_empty() {
+            ui.menu_button("Add to playlist", |ui| {
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for p in self.playlists {
+                        if ui.button(&p.title).clicked() {
+                            actions.push(Action::AddToPlaylist(p.id.clone(), t.id));
+                            ui.close();
+                        }
+                    }
+                });
+            });
         }
     }
 }

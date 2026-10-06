@@ -43,7 +43,7 @@ fn mood(image: &ColorImage) -> Color32 {
         let weight = r.max(g).max(b) - r.min(g).min(b) + 8.0;
         sum = [sum[0] + r * weight, sum[1] + g * weight, sum[2] + b * weight];
     }
-    let scale = 120.0 / sum.iter().copied().fold(1.0, f32::max);
+    let scale = 150.0 / sum.iter().copied().fold(1.0, f32::max);
     let [r, g, b] = sum.map(|c| (c * scale) as u8);
     Color32::from_rgb(r, g, b)
 }

@@ -264,12 +264,17 @@ impl Tidal {
         Ok((s.access_token.clone(), s.country.clone(), s.user_id))
     }
 
-    async fn send(&self, method: Method, url: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
+    async fn request(&self, method: Method, url: &str, query: &[(&str, &str)]) -> Result<reqwest::RequestBuilder> {
         let (token, country, _) = self.auth().await?;
-        let mut req = HTTP.request(method, url).bearer_auth(token).query(&[("countryCode", country.as_str())]).query(query);
-        if url.starts_with(V2) {
-            req = req.header("x-tidal-client-version", "2026.1.5").query(&[("locale", "en_US"), ("deviceType", "BROWSER")]);
-        }
+        let req = HTTP.request(method, url).bearer_auth(token).query(&[("countryCode", country.as_str())]).query(query);
+        Ok(match url.starts_with(V2) {
+            true => req.header("x-tidal-client-version", "2026.1.5").query(&[("locale", "en_US"), ("deviceType", "BROWSER")]),
+            false => req,
+        })
+    }
+
+    async fn send(&self, method: Method, url: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
+        let mut req = self.request(method, url, query).await?;
         if !form.is_empty() {
             req = req.form(form);
         }
@@ -426,6 +431,34 @@ impl Tidal {
             _ => None,
         };
         self.items(&format!("{V2}/my-collection/playlists/folders"), &query, 1000, entry).await
+    }
+
+    /// The playlists the user made (the ones they can add to), most recently changed first.
+    pub async fn my_playlists(&self) -> Result<Vec<Playlist>> {
+        let user = self.auth().await?.2;
+        let url = format!("{V2}/my-collection/playlists/folders/flattened");
+        let (mut playlists, mut cursor) = (Vec::new(), String::new());
+        loop {
+            let query = [("includeOnly", "PLAYLIST"), ("limit", "50"), ("order", "DATE_UPDATED"), ("orderDirection", "DESC"), ("cursor", cursor.as_str())];
+            let mut page = self.get(&url, &query).await?;
+            let mine = |item: &&Value| item["data"]["creator"]["id"].as_u64() == Some(user);
+            playlists.extend(page["items"].as_array().into_iter().flatten().filter(mine).filter_map(|item| playlist(&item["data"])));
+            match page["cursor"].take() {
+                Value::String(next) if !next.is_empty() => cursor = next,
+                _ => return Ok(playlists),
+            }
+        }
+    }
+
+    /// Appends a track to one of the user's playlists. Tidal asks for the playlist's current version.
+    pub async fn add_to_playlist(&self, playlist: &str, track: u64) -> Result<()> {
+        let url = format!("{V1}/playlists/{playlist}");
+        let current = self.send(Method::GET, &url, &[], &[]).await?;
+        let version = current.headers().get("etag").context("no playlist version")?.clone();
+        let form = [("trackIds", track.to_string()), ("onDupes", "SKIP".into()), ("onArtifactNotFound", "SKIP".into())];
+        let req = self.request(Method::POST, &format!("{url}/items"), &[]).await?;
+        req.header("If-None-Match", version).form(&form).send().await?.error_for_status()?;
+        Ok(())
     }
 
     pub async fn favorite_ids(&self) -> Result<HashSet<u64>> {

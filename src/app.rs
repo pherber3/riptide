@@ -15,7 +15,7 @@ use crate::cache;
 use crate::decode::Decoder;
 use crate::player::{Cmd, Event, Player};
 use crate::queue::{self, Queue, Repeat};
-use crate::tidal::{self, Card, Lyrics, Mix, Quality, Shelf, Tidal, Track};
+use crate::tidal::{self, Card, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
 use crate::widgets::{Rows, art, bar, clickable, clock, glow, heart, icon_button, link_text, nav_item, picture, pill, search_field, section, tier_color};
@@ -184,6 +184,9 @@ enum Msg {
     Ready(u64, Box<Decoder>),
     Favorites(HashSet<u64>),
     Folders(Vec<Card>),
+    Playlists(Vec<Playlist>),
+    /// A short confirmation for the top bar.
+    Notice(String),
     Lyrics(u64, Lyrics),
     Error(String),
     Player(Event),
@@ -201,6 +204,8 @@ pub enum Action {
     Move(usize, usize),
     Remove(usize),
     Favorite(u64, bool),
+    /// Add a track to one of the user's playlists (by id).
+    AddToPlaylist(String, u64),
     Toggle,
     Next,
     Prev,
@@ -247,6 +252,9 @@ pub struct App {
     favorites: HashSet<u64>,
     /// Top-level playlist folders and playlists, for the sidebar.
     folders: Vec<Card>,
+    /// The user's own playlists, for "Add to playlist".
+    playlists: Vec<Playlist>,
+    notice: Option<String>,
     side: Option<Side>,
     quality: Quality,
     volume: f32,
@@ -310,6 +318,8 @@ impl App {
             queue: Queue::default(),
             favorites: HashSet::new(),
             folders: Vec::new(),
+            playlists: Vec::new(),
+            notice: None,
             side: None,
             quality,
             volume,
@@ -388,6 +398,12 @@ impl App {
         });
     }
 
+    fn close_lyrics(&mut self) {
+        if self.side == Some(Side::Lyrics) {
+            self.side = None;
+        }
+    }
+
     fn stop(&mut self) {
         self.queue.index = None;
         self.player.send(Cmd::Stop);
@@ -414,7 +430,8 @@ impl App {
         let Some(tidal) = self.tidal.clone() else { return };
         match action {
             Action::Open(source) => {
-                (self.loading, self.error) = (true, None);
+                (self.loading, self.error, self.notice) = (true, None, None);
+                self.close_lyrics();
                 self.spawn(async move { Ok(Msg::Page(Box::new(load(tidal, source).await?))) });
             }
             Action::Play(source) => self.spawn(async move { Ok(Msg::Tracks(load(tidal, source).await?.body.tracks().to_vec())) }),
@@ -442,6 +459,17 @@ impl App {
                     Ok(Msg::Done)
                 });
             }
+            Action::AddToPlaylist(id, track) => {
+                // The playlist moves to the top of the menu, as it was just changed.
+                let Some(at) = self.playlists.iter().position(|p| p.id == id) else { return };
+                let playlist = self.playlists.remove(at);
+                let notice = format!("Added to {}", playlist.title);
+                self.playlists.insert(0, playlist);
+                self.spawn(async move {
+                    tidal.add_to_playlist(&id, track).await?;
+                    Ok(Msg::Notice(notice))
+                });
+            }
             Action::Toggle => self.player.send(Cmd::Toggle),
             Action::Next => self.next(),
             Action::Prev => self.prev(),
@@ -457,7 +485,10 @@ impl App {
                     self.save_settings();
                 }
             }
-            Action::Step(back) => self.step(back),
+            Action::Step(back) => {
+                self.close_lyrics();
+                self.step(back);
+            }
             Action::Quality(quality) => {
                 self.quality = quality;
                 self.save_settings();
@@ -466,7 +497,7 @@ impl App {
                     self.play(i);
                 }
             }
-            Action::Side(side) => self.side = (self.side != Some(side)).then_some(side),
+            Action::Side(side) => (self.side, self.lyric_line) = ((self.side != Some(side)).then_some(side), None),
             Action::FocusSearch => self.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search"))),
         }
     }
@@ -477,10 +508,11 @@ impl App {
                 Msg::SignedIn(tidal) => {
                     self.tidal = Some(tidal.clone());
                     (self.busy, self.login) = (false, None);
-                    let (t, u) = (tidal.clone(), tidal.clone());
+                    let (t, u, v) = (tidal.clone(), tidal.clone(), tidal.clone());
                     self.spawn(async move { Ok(Msg::Page(Box::new(load(tidal, Source::Home).await?))) });
                     self.spawn(async move { Ok(Msg::Favorites(t.favorite_ids().await?)) });
                     self.spawn(async move { Ok(Msg::Folders(u.folder(ROOT).await?)) });
+                    self.spawn(async move { Ok(Msg::Playlists(v.my_playlists().await?)) });
                 }
                 Msg::Page(page) => self.show(*page),
                 Msg::Tracks(tracks) if !tracks.is_empty() => self.apply(Action::PlayTracks(tracks, 0)),
@@ -498,6 +530,8 @@ impl App {
                 Msg::Continue(..) | Msg::Ready(..) | Msg::Done => {}
                 Msg::Favorites(ids) => self.favorites = ids,
                 Msg::Folders(cards) => self.folders = cards,
+                Msg::Playlists(playlists) => self.playlists = playlists,
+                Msg::Notice(text) => self.notice = Some(text),
                 Msg::Lyrics(id, lyrics) => (self.lyrics, self.lyric_line) = (Some((id, Some(lyrics))), None),
                 Msg::Error(e) => (self.busy, self.loading, self.error) = (false, false, Some(e)),
                 Msg::Player(Event::Ended) if self.queue.repeat == Repeat::One => {
@@ -639,10 +673,10 @@ impl App {
         });
     }
 
-    fn player_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn player_bar(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
         let status = self.player.status.clone();
         let mut save = false;
-        let frame = egui::Frame::new().fill(BAR).inner_margin(egui::Margin::symmetric(16, 0));
+        let frame = egui::Frame::new().fill(mood.map_or(BAR, |c| shade(c, 0.75))).inner_margin(egui::Margin::symmetric(16, 0));
         egui::Panel::bottom("player").exact_size(84.0).frame(frame).show(ui, |ui| {
             let edge = ui.clip_rect();
             ui.painter().hline(edge.x_range(), edge.top(), egui::Stroke::new(1.0, LINE));
@@ -754,71 +788,98 @@ impl App {
         }
     }
 
-    /// The queue or the current track's lyrics, beside the page.
-    fn side_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let Some(side) = self.side else { return };
-        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, queue: true };
+    /// The queue, beside the page.
+    fn queue_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        if self.side != Some(Side::Queue) {
+            return;
+        }
+        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: true };
         let frame = egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(20, 0));
         egui::Panel::right("side").default_size(420.0).resizable(true).frame(frame).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match side {
-                Side::Queue => {
-                    section(ui, "Queue");
-                    if self.queue.tracks.is_empty() {
-                        ui.label(RichText::new("Nothing queued. Right-click a track to add it.").color(SECONDARY));
-                    }
-                    rows.show(ui, &self.queue.tracks, None, false, None, actions);
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                section(ui, "Queue");
+                if self.queue.tracks.is_empty() {
+                    ui.label(RichText::new("Nothing queued. Right-click a track to add it.").color(SECONDARY));
                 }
-                Side::Lyrics => {
-                    let position = self.player.status.position();
-                    let track = self.queue.current().map(|t| t.id);
-                    let lyrics = self.lyrics.as_ref().filter(|(id, _)| Some(*id) == track).map(|(_, l)| l);
-                    ui.add_space(32.0);
-                    let note = |ui: &mut Ui, text: &str| ui.label(RichText::new(text).size(15.0).color(SECONDARY));
-                    match (track, lyrics) {
-                        (None, _) => {
-                            note(ui, "Nothing is playing.");
-                        }
-                        (Some(_), None | Some(None)) => {
+                rows.show(ui, &self.queue.tracks, None, false, None, actions);
+            });
+        });
+    }
+
+    /// The playing track's artwork and lyrics over the whole window, in the artwork's colour.
+    fn now_playing(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
+        let (soft, faint) = (Color32::from_white_alpha(180), Color32::from_white_alpha(110));
+        let frame = egui::Frame::new().fill(mood.unwrap_or(BAR)).inner_margin(egui::Margin { left: 56, right: 40, top: 16, bottom: 0 });
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                if icon_button(ui, Icon::Down, 24.0, soft).on_hover_text("Close (Esc)").clicked() {
+                    actions.push(Action::Side(Side::Lyrics));
+                }
+            });
+            let Some(t) = self.queue.current() else {
+                ui.centered_and_justified(|ui| ui.label(RichText::new("Nothing is playing.").font(semibold(20.0)).color(soft)));
+                return;
+            };
+            let height = ui.available_height();
+            let side = (ui.available_width() * 0.42).min(height - 100.0).max(120.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(side);
+                    ui.add_space(((height - side - 70.0) / 2.0).max(0.0));
+                    picture(ui, art(t.cover.as_deref(), 640), side, false);
+                    ui.add_space(16.0);
+                    ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(20.0)).color(Color32::WHITE)).truncate());
+                    ui.add(egui::Label::new(RichText::new(&t.artist).size(15.0).color(soft)).truncate());
+                });
+                ui.add_space(64.0);
+                let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
+                let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+                scroll.show(ui, |ui| {
+                    ui.add_space(height * 0.2);
+                    let line = |text: &str, color| RichText::new(text).font(bold(34.0)).color(color);
+                    match lyrics {
+                        None => {
                             ui.spinner();
                         }
-                        (Some(_), Some(Some(l))) if l.synced.is_empty() && l.text.is_empty() => {
-                            note(ui, "No lyrics for this track.");
+                        Some(l) if l.synced.is_empty() && l.text.is_empty() => {
+                            ui.label(line("No lyrics for this track.", soft));
                         }
-                        (Some(_), Some(Some(l))) if l.synced.is_empty() => {
-                            ui.label(RichText::new(&l.text).font(semibold(18.0)).color(TEXT));
+                        Some(l) if l.synced.is_empty() => {
+                            ui.label(RichText::new(&l.text).font(semibold(24.0)).color(Color32::WHITE));
                         }
-                        (Some(_), Some(Some(l))) => {
+                        Some(l) => {
+                            let position = self.player.status.position();
                             let now = l.synced.iter().rposition(|(at, _)| *at <= position);
                             for (n, (at, words)) in l.synced.iter().enumerate() {
-                                let color = if Some(n) == now { TEXT } else { Color32::from_gray(84) };
+                                let color = if Some(n) == now { Color32::WHITE } else { faint };
                                 let words = if words.is_empty() { "♪" } else { words };
-                                let line = ui.add(egui::Label::new(RichText::new(words).font(bold(26.0)).color(color)).selectable(false).sense(Sense::click()));
+                                let response = ui.add(egui::Label::new(line(words, color)).selectable(false).sense(Sense::click()));
                                 if Some(n) == now && self.lyric_line != now {
-                                    line.scroll_to_me(Some(Align::Center));
+                                    response.scroll_to_me(Some(Align::Center));
                                 }
-                                if clickable(line).clicked() {
+                                if clickable(response).clicked() {
                                     actions.push(Action::Seek(*at));
                                 }
-                                ui.add_space(12.0);
+                                ui.add_space(18.0);
                             }
                             self.lyric_line = now;
                         }
                     }
-                    ui.add_space(32.0);
-                }
+                    ui.add_space(height / 2.0);
+                });
             });
         });
     }
 
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, queue: false };
+        let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: false };
         let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The page's artwork colour, glowing down from the top.
             let cover = self.page.as_ref().and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());
             if let Some(color) = cover.and_then(crate::art::tint) {
                 let full = ui.clip_rect();
-                glow(ui, egui::Rect::from_min_size(full.min, vec2(full.width(), 460.0)), color.gamma_multiply(0.75));
+                glow(ui, egui::Rect::from_min_size(full.min, vec2(full.width(), 460.0)), color.gamma_multiply(0.6));
             }
             ui.horizontal(|ui| {
                 for (icon, enabled, back) in [(Icon::Back, !self.back.is_empty(), true), (Icon::Forward, !self.forward.is_empty(), false)] {
@@ -836,6 +897,8 @@ impl App {
                 }
                 if let Some(e) = &self.error {
                     ui.add(egui::Label::new(RichText::new(e).color(DANGER)).truncate());
+                } else if let Some(notice) = &self.notice {
+                    ui.add(egui::Label::new(RichText::new(notice).color(SECONDARY)).truncate());
                 }
             });
             ui.add_space(4.0);
@@ -859,6 +922,9 @@ impl eframe::App for App {
             if i.key_pressed(Key::Space) && !typing {
                 actions.push(Action::Toggle);
             }
+            if i.key_pressed(Key::Escape) && self.side == Some(Side::Lyrics) {
+                actions.push(Action::Side(Side::Lyrics));
+            }
             // The mouse's side buttons, Alt+arrows and the keyboard's Back key, as in a web browser.
             let alt = |key| i.modifiers.alt && i.key_pressed(key);
             if i.pointer.button_pressed(egui::PointerButton::Extra1) || alt(Key::ArrowLeft) || i.key_pressed(Key::BrowserBack) {
@@ -875,10 +941,18 @@ impl eframe::App for App {
             self.lyrics = Some((id, None));
             self.spawn(async move { Ok(Msg::Lyrics(id, tidal.lyrics(id).await?)) });
         }
-        self.player_bar(ui, &mut actions);
-        self.sidebar(ui, &mut actions);
-        self.side_panel(ui, &mut actions);
-        self.content(ui, &mut actions);
+        // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
+        let lyrics_open = self.side == Some(Side::Lyrics);
+        let cover = self.queue.current().filter(|_| lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
+        let mood = cover.and_then(|url| crate::art::tint(&url));
+        self.player_bar(ui, mood, &mut actions);
+        if lyrics_open {
+            self.now_playing(ui, mood, &mut actions);
+        } else {
+            self.sidebar(ui, &mut actions);
+            self.queue_panel(ui, &mut actions);
+            self.content(ui, &mut actions);
+        }
         for action in actions {
             self.apply(action);
         }
@@ -888,6 +962,12 @@ impl eframe::App for App {
             ui.ctx().request_repaint_after(Duration::from_millis(step));
         }
     }
+}
+
+/// A colour scaled darker (below 1) or lighter.
+fn shade(color: Color32, by: f32) -> Color32 {
+    let [r, g, b, _] = color.to_array().map(|c| (f32::from(c) * by).min(255.0) as u8);
+    Color32::from_rgb(r, g, b)
 }
 
 fn settings_path(session: &Path) -> PathBuf {
