@@ -31,6 +31,12 @@ impl LastFm {
         Some(Self { key: field("key")?, secret: field("secret")?, session, path })
     }
 
+    /// Forgets the session; scrobbling stops until connected again.
+    pub fn disconnect(&mut self) -> Result<()> {
+        self.session = None;
+        self.save()
+    }
+
     fn save(&self) -> Result<()> {
         let mut text = format!("key={}\nsecret={}\n", self.key, self.secret);
         if let Some((session, user)) = &self.session {

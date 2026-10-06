@@ -207,6 +207,7 @@ pub enum Action {
     /// Make a playlist with this name and add a track to it.
     CreatePlaylist(String, u64),
     ConnectLastFm,
+    DisconnectLastFm,
     Toggle,
     Next,
     Prev,
@@ -517,6 +518,11 @@ impl App {
                     self.error = Some(format!("Add your Last.fm API key and secret to {} first", path.display()));
                 }
             },
+            Action::DisconnectLastFm => {
+                if let Some(Err(e)) = self.lastfm.as_mut().map(LastFm::disconnect) {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
             Action::Toggle => self.player.send(Cmd::Toggle),
             Action::Next => self.next(),
             Action::Prev => self.prev(),
@@ -720,11 +726,6 @@ impl App {
                     actions.push(Action::Open(source));
                 }
             }
-            let scrobbling = self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| format!("Last.fm: {user}"));
-            let text = scrobbling.as_deref().unwrap_or("Connect Last.fm");
-            if nav_item(ui, Icon::Playing, text, false).on_hover_text("Scrobble what you play to Last.fm").clicked() {
-                actions.push(Action::ConnectLastFm);
-            }
             heading(ui, "PLAYLISTS");
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 for card in &self.folders {
@@ -842,14 +843,7 @@ impl App {
                     let (tier, format) = if track.is_some() { (tier, format) } else { (self.quality, String::new()) };
                     let color = tier_color(tier);
                     let badge = egui::Button::new(RichText::new(tier.name().to_uppercase()).font(bold(11.0)).color(color)).fill(color.gamma_multiply(0.14)).corner_radius(4.0);
-                    egui::containers::menu::MenuButton::from_button(badge).ui(ui, |ui| {
-                        for q in Quality::ALL {
-                            if ui.radio(self.quality == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
-                                actions.push(Action::Quality(q));
-                                ui.close();
-                            }
-                        }
-                    });
+                    egui::containers::menu::MenuButton::from_button(badge).ui(ui, |ui| quality_choices(ui, self.quality, actions));
                     ui.label(RichText::new(format).size(11.0).color(mood.map_or(DIM, |_| Color32::from_white_alpha(150))));
                 });
             });
@@ -944,6 +938,7 @@ impl App {
 
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let rows = Rows { playing: self.queue.current().map(|t| t.id), favorites: &self.favorites, playlists: &self.playlists, queue: false };
+        let (quality, lastfm_user) = (self.quality, self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.clone()));
         let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The page's artwork colour, glowing down from the top.
@@ -964,14 +959,20 @@ impl App {
                 if search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.query.trim().is_empty() {
                     actions.push(Action::Open(Source::Search(self.query.trim().into())));
                 }
-                if self.loading {
-                    ui.spinner();
-                }
-                if let Some(e) = &self.error {
-                    ui.add(egui::Label::new(RichText::new(e).color(DANGER)).truncate());
-                } else if let Some(notice) = &self.notice {
-                    ui.add(egui::Label::new(RichText::new(notice).color(SECONDARY)).truncate());
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let gear = egui::Button::image(Icon::Settings.image(SECONDARY, 20.0)).frame(false);
+                    egui::containers::menu::MenuButton::from_button(gear).ui(ui, |ui| settings(ui, quality, lastfm_user.as_deref(), actions));
+                    ui.add_space(8.0);
+                    if self.loading {
+                        ui.spinner();
+                    }
+                    let message = |text: &str, color| egui::Label::new(RichText::new(text).color(color)).truncate();
+                    if let Some(e) = &self.error {
+                        ui.add(message(e, DANGER));
+                    } else if let Some(notice) = &self.notice {
+                        ui.add(message(notice, SECONDARY));
+                    }
+                });
             });
             ui.add_space(4.0);
             if let Some(page) = &mut self.page {
@@ -1039,6 +1040,41 @@ impl eframe::App for App {
             let lyrics = self.lyrics.as_ref().and_then(|(_, l)| l.as_ref()).filter(|_| self.lyrics_open);
             let next_line = lyrics.and_then(|l| l.synced.iter().find(|(at, _)| *at > position)).map(|(at, _)| at - position);
             ui.ctx().request_repaint_after(Duration::from_secs_f64(next_line.unwrap_or(1.0).clamp(0.02, 1.0)));
+        }
+    }
+}
+
+/// The settings menu behind the gear at the top right.
+fn settings(ui: &mut Ui, quality: Quality, lastfm_user: Option<&str>, actions: &mut Vec<Action>) {
+    ui.set_min_width(240.0);
+    ui.spacing_mut().button_padding = vec2(12.0, 7.0);
+    let heading = |ui: &mut Ui, text: &str| ui.label(RichText::new(text).font(semibold(11.0)).color(DIM));
+    heading(ui, "STREAMING QUALITY");
+    quality_choices(ui, quality, actions);
+    ui.separator();
+    heading(ui, "LAST.FM");
+    match lastfm_user {
+        Some(user) => {
+            ui.label(format!("Scrobbling as {user}"));
+            if ui.button("Disconnect").clicked() {
+                actions.push(Action::DisconnectLastFm);
+                ui.close();
+            }
+        }
+        None => {
+            if ui.button("Connect Last.fm").clicked() {
+                actions.push(Action::ConnectLastFm);
+                ui.close();
+            }
+        }
+    }
+}
+
+fn quality_choices(ui: &mut Ui, current: Quality, actions: &mut Vec<Action>) {
+    for q in Quality::ALL {
+        if ui.radio(current == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
+            actions.push(Action::Quality(q));
+            ui.close();
         }
     }
 }
