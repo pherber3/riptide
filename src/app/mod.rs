@@ -88,7 +88,6 @@ pub enum Action {
     Queue,
     /// Open or close the full-window lyrics.
     Lyrics,
-    FocusSearch,
 }
 
 pub struct App {
@@ -468,7 +467,6 @@ impl App {
             }
             Action::Queue => self.queue_open = !self.queue_open,
             Action::Lyrics => (self.lyrics_open, self.lyric_line) = (!self.lyrics_open, None),
-            Action::FocusSearch => self.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search"))),
             library => self.edit(tidal, library),
         }
     }

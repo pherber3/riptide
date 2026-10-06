@@ -72,7 +72,6 @@ impl App {
             let top = [
                 (Icon::Home, "Home", open == Some(&Source::Home), Action::Open(Source::Home)),
                 (Icon::Explore, "Explore", open == Some(&Source::explore()), Action::Open(Source::explore())),
-                (Icon::Search, "Search", matches!(open, Some(Source::Search(_))), Action::FocusSearch),
             ];
             for (icon, text, selected, action) in top {
                 if nav_item(ui, icon, text, selected).clicked() {
