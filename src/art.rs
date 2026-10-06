@@ -16,7 +16,6 @@ enum Entry {
 /// what is on screen (the app forgets all images on every page change).
 pub struct Art {
     dir: PathBuf,
-    http: reqwest::Client,
     rt: tokio::runtime::Handle,
     entries: Arc<Mutex<HashMap<String, Entry>>>,
 }
@@ -24,7 +23,7 @@ pub struct Art {
 impl Art {
     pub fn new(dir: PathBuf, rt: tokio::runtime::Handle) -> Self {
         let _ = std::fs::create_dir_all(&dir);
-        Self { dir, http: reqwest::Client::new(), rt, entries: Default::default() }
+        Self { dir, rt, entries: Default::default() }
     }
 }
 
@@ -58,7 +57,7 @@ impl ImageLoader for Art {
         }
         entries.insert(uri.into(), Entry::Pending);
         let path = self.dir.join(name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "_"));
-        let (http, entries, ctx, uri) = (self.http.clone(), self.entries.clone(), ctx.clone(), uri.to_string());
+        let (http, entries, ctx, uri) = (&*crate::tidal::HTTP, self.entries.clone(), ctx.clone(), uri.to_string());
         self.rt.spawn(async move {
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => Some(bytes),

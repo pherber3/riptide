@@ -4,21 +4,16 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
-use std::time::Duration;
-
 use anyhow::Result;
 use futures_util::{StreamExt, stream};
 
-use crate::tidal::{Parts, Quality, Tidal};
+use crate::tidal::{HTTP, Parts, Quality, Tidal};
 
 /// Hi-res segments fetched at once; more barely helps and just competes with everything else.
 const PARALLEL: usize = 4;
 
-/// One client for all audio, so connections are reused; timeouts turn a stalled network into an error.
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(20));
-    builder.build().expect("HTTP client")
-});
+/// Serialises starting downloads, so two requests for one track (prefetch, then play) can't both start it.
+static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Downloads in progress, so a second reader (prefetch, then play) shares the first download.
 static ACTIVE: LazyLock<Mutex<HashMap<PathBuf, Shared>>> = LazyLock::new(Default::default);
@@ -107,15 +102,18 @@ impl Writer {
 }
 
 /// A reader for a track, downloading it into the cache unless it is already there or on its way.
-pub async fn track(tidal: &tokio::sync::Mutex<Tidal>, dir: &Path, id: u64, quality: Quality) -> Result<Reader> {
+pub async fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Result<Reader> {
     let path = dir.join(format!("{id}-{quality:?}"));
-    let mut tidal = tidal.lock().await;
     if let Some(reader) = open(&path) {
         return Ok(reader);
     }
-    let stream = tidal.stream(id, quality).await?;
+    let _starting = STARTING.lock().await;
+    if let Some(reader) = open(&path) {
+        return Ok(reader);
+    }
+    let parts = tidal.stream(id, quality).await?;
     let (writer, reader) = create(&path)?;
-    tokio::spawn(async move { fetch(&stream.parts, writer).await });
+    tokio::spawn(async move { fetch(&parts, writer).await });
     Ok(reader)
 }
 
@@ -208,7 +206,7 @@ async fn fetch_into(parts: &Parts, w: &mut Writer) -> anyhow::Result<()> {
                 copy(http.get(url).send().await?.error_for_status()?, w).await?;
             }
         }
-        Parts::Segments { init, template, start } => {
+        Parts::Segments { init, template, start, count } => {
             let init = http.get(init).send().await?.error_for_status()?.bytes().await?;
             // Hi-res FLAC arrives as fragmented MP4. Rewrap it as a native FLAC stream so it
             // decodes progressively; symphonia's MP4 reader wants the whole file first, so
@@ -221,20 +219,16 @@ async fn fetch_into(parts: &Parts, w: &mut Writer) -> anyhow::Result<()> {
                     w.append(&init)?;
                 }
             }
-            let start = *start;
-            // A few segments in flight at once, written in order. tidlers doesn't parse the segment
-            // timeline, so the first 4xx after segment one is the end.
-            let mut segments = stream::iter(start..)
+            // A few segments in flight at once, written in order.
+            anyhow::ensure!(*count > 0, "the stream manifest lists no segments");
+            let mut segments = stream::iter(*start..start + count)
                 .map(|n| async move {
                     let resp = http.get(template.replace("$Number$", &n.to_string())).send().await?;
-                    if resp.status().is_client_error() && n > start {
-                        return Ok(None);
-                    }
-                    anyhow::Ok(Some(resp.error_for_status()?.bytes().await?))
+                    anyhow::Ok(resp.error_for_status()?.bytes().await?)
                 })
                 .buffered(PARALLEL);
             while let Some(segment) = segments.next().await {
-                let Some(segment) = segment? else { break };
+                let segment = segment?;
                 if dfla.is_none() {
                     w.append(&segment)?;
                     continue;

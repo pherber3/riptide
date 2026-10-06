@@ -34,15 +34,6 @@ fn main() -> Result<()> {
             eframe::run_native("tidalfast", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir)?))))
                 .map_err(|e| anyhow!("{e}"))?;
         }
-        ["login"] => {
-            let (mut tidal, url) = Tidal::start_login(&session)?;
-            println!("Sign in in your browser, then paste the address of the page you land on:\n{url}");
-            let _ = open::that(&url);
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
-            tokio::runtime::Runtime::new()?.block_on(tidal.finish_login(&line))?;
-            println!("Signed in.");
-        }
         ["play", id, rest @ ..] => {
             let quality = match rest.first() {
                 Some(name) => Quality::parse(name).context("quality must be low, high or max")?,
@@ -52,7 +43,7 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&cache_dir)?;
             cache::evict(&cache_dir, CACHE_BYTES)?;
             let rt = tokio::runtime::Runtime::new()?;
-            let tidal = tokio::sync::Mutex::new(rt.block_on(Tidal::load(&session))?);
+            let tidal = rt.block_on(Tidal::load(&session))?;
             let reader = rt.block_on(cache::track(&tidal, &cache_dir, id.parse()?, quality))?;
             let (tx, rx) = channel();
             let player = Player::start(move |e| {
@@ -72,7 +63,7 @@ fn main() -> Result<()> {
             }
             println!();
         }
-        _ => eprintln!("usage: tidalfast [login | play <track-id> [low|high|max]]"),
+        _ => eprintln!("usage: tidalfast [play <track-id> [low|high|max]]"),
     }
     Ok(())
 }

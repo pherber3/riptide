@@ -9,7 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use egui::{Align, Color32, Key, Layout, Rect, RichText, Sense, Ui, vec2};
 use fastframe_now_playing as np;
-use tokio::sync::Mutex;
 
 use crate::art::Art;
 use crate::cache;
@@ -56,7 +55,7 @@ enum Repeat {
 enum Msg {
     Page(Page),
     Ready(u64, Box<Decoder>),
-    SignedIn(Box<Tidal>),
+    SignedIn(Tidal),
     Favorites(HashSet<u64>),
     Folders(Vec<Entry>),
     Done,
@@ -105,10 +104,9 @@ enum Action {
     Quality(Quality),
 }
 
-/// A sign-in in progress: the client holding the PKCE secret, the URL to open and what the user pasted.
+/// A sign-in in progress and what the user pasted.
 struct Login {
-    client: Option<Tidal>,
-    url: String,
+    flow: Option<tidal::Login>,
     pasted: String,
 }
 
@@ -119,7 +117,7 @@ pub struct App {
     rx: Receiver<Msg>,
     session: PathBuf,
     cache: PathBuf,
-    tidal: Option<Arc<Mutex<Tidal>>>,
+    tidal: Option<Tidal>,
     login: Option<Login>,
     busy: bool,
     error: Option<String>,
@@ -226,7 +224,7 @@ impl App {
         };
         if app.busy {
             let session = app.session.clone();
-            app.spawn(async move { Ok(Msg::SignedIn(Box::new(Tidal::load(&session).await?))) });
+            app.spawn(async move { Ok(Msg::SignedIn(Tidal::load(&session).await?)) });
         }
         Ok(app)
     }
@@ -300,7 +298,7 @@ impl App {
             Some(_) if self.repeat == Repeat::All => self.play(0),
             Some(i) if let Some(tidal) = self.tidal.clone() => {
                 let id = self.queue[i].id;
-                self.spawn(async move { Ok(Msg::Continue(id, tidal.lock().await.track_radio(id).await?)) });
+                self.spawn(async move { Ok(Msg::Continue(id, tidal.radio("tracks", id).await?)) });
             }
             _ => {
                 self.index = None;
@@ -347,23 +345,23 @@ impl App {
             Action::Search => {
                 let query = self.query.trim().to_string();
                 if !query.is_empty() {
-                    self.navigate(async move { Ok(Page::Search(tidal.lock().await.search(&query).await?)) });
+                    self.navigate(async move { Ok(Page::Search(tidal.search(&query).await?)) });
                 }
             }
             Action::Album(id) => self.navigate(async move {
-                let (album, tracks) = tidal.lock().await.album(id).await?;
+                let (album, tracks) = tidal.album(id).await?;
                 Ok(Page::Album(album, tracks))
             }),
             Action::Artist(id) => self.navigate(async move {
-                let (artist, top, albums) = tidal.lock().await.artist(id).await?;
+                let (artist, top, albums) = tidal.artist(id).await?;
                 Ok(Page::Artist(artist, top, albums))
             }),
             Action::Playlist(id) => self.navigate(async move {
-                let (playlist, tracks) = tidal.lock().await.playlist(&id).await?;
+                let (playlist, tracks) = tidal.playlist(&id).await?;
                 Ok(Page::Playlist(playlist, tracks))
             }),
             Action::Library(kind) => self.navigate(async move {
-                let mut t = tidal.lock().await;
+                let t = tidal;
                 Ok(match kind {
                     Library::Tracks => Page::Tracks(t.favorite_tracks().await?),
                     Library::Albums => Page::Albums(t.favorite_albums().await?),
@@ -374,11 +372,11 @@ impl App {
             Action::Queue => self.show(Page::Queue),
             Action::Home => self.navigate(home_page(tidal)),
             Action::Folder(id, name) => self.navigate(async move {
-                let entries = tidal.lock().await.folder(&id).await?;
+                let entries = tidal.folder(&id).await?;
                 Ok(Page::Playlists(id, name, entries))
             }),
             Action::Mix(mix) => self.navigate(async move {
-                let tracks = tidal.lock().await.mix_tracks(&mix.id).await?;
+                let tracks = tidal.mix_tracks(&mix.id).await?;
                 Ok(Page::Mix(mix, tracks))
             }),
             Action::Lyrics if matches!(self.page, Page::Lyrics) => self.apply(Action::Back),
@@ -389,11 +387,11 @@ impl App {
                 self.queue = tracks;
                 self.play(0);
             }
-            Action::TrackRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.track_radio(id).await?)) }),
-            Action::PlayAlbum(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.album(id).await?.1)) }),
-            Action::PlayPlaylist(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.playlist(&id).await?.1)) }),
-            Action::PlayMix(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.mix_tracks(&id).await?)) }),
-            Action::ArtistRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.lock().await.artist_radio(id).await?)) }),
+            Action::TrackRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.radio("tracks", id).await?)) }),
+            Action::PlayAlbum(id) => self.spawn(async move { Ok(Msg::Radio(tidal.album(id).await?.1)) }),
+            Action::PlayPlaylist(id) => self.spawn(async move { Ok(Msg::Radio(tidal.playlist(&id).await?.1)) }),
+            Action::PlayMix(id) => self.spawn(async move { Ok(Msg::Radio(tidal.mix_tracks(&id).await?)) }),
+            Action::ArtistRadio(id) => self.spawn(async move { Ok(Msg::Radio(tidal.radio("artists", id).await?)) }),
             // Sorting by the current column again reverses it, as Tidal does.
             Action::Sort(sort) => {
                 let view = &mut self.view;
@@ -447,7 +445,7 @@ impl App {
             Action::Favorite(id, on) => {
                 if on { self.favorites.insert(id) } else { self.favorites.remove(&id) };
                 self.spawn(async move {
-                    tidal.lock().await.set_favorite(id, on).await?;
+                    tidal.set_favorite(id, on).await?;
                     Ok(Msg::Done)
                 });
             }
@@ -509,14 +507,12 @@ impl App {
                     self.lyric_line = None;
                 }
                 Msg::SignedIn(tidal) => {
-                    let tidal = Arc::new(Mutex::new(*tidal));
                     self.tidal = Some(tidal.clone());
                     (self.busy, self.login) = (false, None);
+                    let (t, u) = (tidal.clone(), tidal.clone());
                     self.spawn(async move { Ok(Msg::Page(home_page(tidal).await?)) });
-                    let tidal = self.tidal.clone().expect("just signed in");
-                    self.spawn(async move { Ok(Msg::Favorites(tidal.lock().await.favorite_ids().await?)) });
-                    let tidal = self.tidal.clone().expect("just signed in");
-                    self.spawn(async move { Ok(Msg::Folders(tidal.lock().await.folder("root").await?)) });
+                    self.spawn(async move { Ok(Msg::Favorites(t.favorite_ids().await?)) });
+                    self.spawn(async move { Ok(Msg::Folders(u.folder("root").await?)) });
                 }
                 Msg::Favorites(ids) => self.favorites = ids,
                 Msg::Folders(entries) => self.folders = entries,
@@ -587,18 +583,16 @@ impl App {
                 } else if let Some(login) = &mut self.login {
                     ui.label("Sign in in your browser, then paste the address of the page you land on:");
                     ui.add(egui::TextEdit::singleline(&mut login.pasted).desired_width(520.0));
+                    if let Some(flow) = &login.flow {
+                        ui.hyperlink_to("Open the sign-in page again", &flow.url);
+                    }
                     if ui.button("Continue").clicked() {
-                        finish = login.client.take().map(|client| (client, login.pasted.clone()));
+                        finish = login.flow.take().map(|flow| (flow, login.pasted.clone()));
                     }
-                    ui.hyperlink_to("Open the sign-in page again", &login.url);
                 } else if ui.button(RichText::new("Sign in with Tidal").size(18.0)).clicked() {
-                    match Tidal::start_login(&self.session) {
-                        Ok((client, url)) => {
-                            let _ = open::that(&url);
-                            self.login = Some(Login { client: Some(client), url, pasted: String::new() });
-                        }
-                        Err(e) => self.error = Some(format!("{e:#}")),
-                    }
+                    let flow = tidal::Login::start();
+                    let _ = open::that(&flow.url);
+                    self.login = Some(Login { flow: Some(flow), pasted: String::new() });
                 }
                 if let Some(e) = &self.error {
                     ui.add_space(12.0);
@@ -606,12 +600,10 @@ impl App {
                 }
             });
         });
-        if let Some((mut client, pasted)) = finish {
+        if let Some((flow, pasted)) = finish {
             (self.busy, self.error, self.login) = (true, None, None);
-            self.spawn(async move {
-                client.finish_login(&pasted).await?;
-                Ok(Msg::SignedIn(Box::new(client)))
-            });
+            let session = self.session.clone();
+            self.spawn(async move { Ok(Msg::SignedIn(flow.finish(&pasted, &session).await?)) });
         }
     }
 
@@ -946,7 +938,7 @@ impl eframe::App for App {
         {
             let id = t.id;
             self.lyrics = Some((id, None));
-            self.spawn(async move { Ok(Msg::Lyrics(id, tidal.lock().await.lyrics(id).await?)) });
+            self.spawn(async move { Ok(Msg::Lyrics(id, tidal.lyrics(id).await?)) });
         }
         self.player_bar(ui, &mut actions);
         self.sidebar(ui, &mut actions);
@@ -1300,8 +1292,7 @@ fn home_card(ui: &mut Ui, card_data: &Card, actions: &mut Vec<Action>) {
 }
 
 /// Tidal's home feed, or your playlists if it can't be had.
-async fn home_page(tidal: Arc<Mutex<Tidal>>) -> Result<Page> {
-    let mut tidal = tidal.lock().await;
+async fn home_page(tidal: Tidal) -> Result<Page> {
     match tidal.home().await {
         Ok(shelves) if !shelves.is_empty() => Ok(Page::Home(shelves)),
         _ => Ok(Page::Playlists("root".into(), "Playlists".into(), tidal.folder("root").await?)),

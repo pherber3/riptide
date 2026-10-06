@@ -1,15 +1,31 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tidlers::TidalClient;
-use tidlers::auth::TidalAuth;
-use tidlers::client::models::playback::AudioQuality;
-use tidlers::client::models::track::playback::ParsedTrackManifest;
+use sha2::{Digest, Sha256};
 
-const API: &str = "https://api.tidal.com/v1";
+const V1: &str = "https://api.tidal.com/v1";
+const V2: &str = "https://api.tidal.com/v2";
+const TOKEN: &str = "https://auth.tidal.com/v1/oauth2/token";
+const REDIRECT: &str = "https://tidal.com/android/login/auth";
+const SCOPE: &str = "r_usr+w_usr+w_sub";
+/// Tidal's Android app credentials ("id;secret"), as tidlers and python-tidalapi use; needed for hi-res.
+const CLIENT: &str = "NkJEU1JkcEs5aHFFQlRnVTt4ZXVQbVk3bmJwWjlJSWJMQWNROTNzaGthMVZOaGVVQXFONkljc3pqVEc4PQ==";
+
+/// One client for everything (API, audio, artwork), so connections are reused; timeouts turn a stalled
+/// network into an error.
+pub static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(20));
+    builder.build().expect("HTTP client")
+});
 
 /// Tidal's tiers: Low is AAC, High is 16-bit lossless FLAC, Max is hi-res FLAC.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,22 +50,19 @@ impl Quality {
         }
     }
 
-    fn tidlers(self) -> AudioQuality {
+    fn api(self) -> &'static str {
         match self {
-            Self::Low => AudioQuality::High,
-            Self::High => AudioQuality::Lossless,
-            Self::Max => AudioQuality::HiRes,
+            Self::Low => "HIGH",
+            Self::High => "LOSSLESS",
+            Self::Max => "HI_RES",
         }
     }
 }
 
+/// Where a stream's bytes are: whole files, or DASH segments `start..start + count` (count 0 when unknown).
 pub enum Parts {
     Urls(Vec<String>),
-    Segments { init: String, template: String, start: u32 },
-}
-
-pub struct Stream {
-    pub parts: Parts,
+    Segments { init: String, template: String, start: u32, count: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -142,121 +155,177 @@ pub fn image(id: &str, size: u32) -> String {
     format!("https://resources.tidal.com/images/{}/{size}x{size}.jpg", id.replace('-', "/"))
 }
 
+pub fn session_path(dir: &Path) -> PathBuf {
+    dir.join("data").join("session.json")
+}
+
+fn client() -> (String, String) {
+    let decoded = String::from_utf8(STANDARD.decode(CLIENT).expect("client")).expect("client");
+    let (id, secret) = decoded.split_once(';').expect("client");
+    (id.into(), secret.into())
+}
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+#[derive(Serialize, Deserialize)]
+struct Session {
+    access_token: String,
+    refresh_token: String,
+    expires_at: u64,
+    user_id: u64,
+    country: String,
+}
+
+impl Session {
+    /// From a token response; a refresh keeps the refresh token it was made with.
+    fn from_token(v: &Value, refresh_token: Option<&str>) -> Result<Self> {
+        Ok(Self {
+            access_token: v["access_token"].as_str().context("no access token")?.into(),
+            refresh_token: v["refresh_token"].as_str().or(refresh_token).context("no refresh token")?.into(),
+            expires_at: now() + v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(60),
+            user_id: v["user"]["userId"].as_u64().or(v["user_id"].as_u64()).context("no user")?,
+            country: v["user"]["countryCode"].as_str().unwrap_or("US").into(),
+        })
+    }
+}
+
+async fn token(form: &[(&str, &str)]) -> Result<Value> {
+    let (id, secret) = client();
+    let form = [form, &[("client_id", id.as_str()), ("scope", SCOPE)]].concat();
+    let resp = HTTP.post(TOKEN).basic_auth(&id, Some(&secret)).form(&form).send().await?;
+    Ok(resp.error_for_status()?.json().await?)
+}
+
+/// A browser sign-in in progress (OAuth PKCE): open `url`, then pass the address it lands on to `finish`.
+pub struct Login {
+    verifier: String,
+    unique_key: String,
+    pub url: String,
+}
+
+impl Login {
+    pub fn start() -> Self {
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).expect("random bytes");
+        let verifier = URL_SAFE_NO_PAD.encode(random);
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let unique_key = format!("{:016x}", u64::from_le_bytes(random[..8].try_into().expect("8 bytes")));
+        let query = [
+            ("response_type", "code"),
+            ("redirect_uri", REDIRECT),
+            ("client_id", &client().0),
+            ("lang", "EN"),
+            ("appMode", "android"),
+            ("client_unique_key", &unique_key),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("restrict_signup", "true"),
+        ];
+        let url = reqwest::Url::parse_with_params("https://login.tidal.com/authorize", &query).expect("login URL").into();
+        Self { verifier, unique_key, url }
+    }
+
+    pub async fn finish(self, landed: &str, path: &Path) -> Result<Tidal> {
+        let landed = reqwest::Url::parse(landed.trim()).context("that isn't a web address")?;
+        let code = landed.query_pairs().find(|(k, _)| k == "code").context("no sign-in code in that address")?.1;
+        let form = [
+            ("code", &*code),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", REDIRECT),
+            ("code_verifier", &self.verifier),
+            ("client_unique_key", &self.unique_key),
+        ];
+        let session = Session::from_token(&token(&form).await?, None)?;
+        Tidal::new(session, path)
+    }
+}
+
+/// A signed-in Tidal account. Cheap to clone and use from many tasks at once: only the token is
+/// behind a lock, and only while it is read or refreshed.
+#[derive(Clone)]
 pub struct Tidal {
-    client: TidalClient,
-    session: PathBuf,
-    http: reqwest::Client,
+    session: Arc<tokio::sync::Mutex<Session>>,
+    path: Arc<PathBuf>,
 }
 
 impl Tidal {
-    /// Starts a PKCE sign-in; the user opens the URL and passes the address they land on to `finish_login`.
-    pub fn start_login(session: &Path) -> Result<(Self, String)> {
-        let mut client = TidalClient::new(&TidalAuth::with_pkce());
-        let url = client.initiate_pkce_login()?;
-        Ok((Self { client, session: session.into(), http: reqwest::Client::new() }, url))
+    /// A new sign-in, saved for next time.
+    fn new(session: Session, path: &Path) -> Result<Self> {
+        std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+        std::fs::write(path, serde_json::to_string(&session)?)?;
+        Ok(Self { session: Arc::new(tokio::sync::Mutex::new(session)), path: Arc::new(path.into()) })
     }
 
-    pub async fn finish_login(&mut self, redirect: &str) -> Result<()> {
-        self.client.finish_pkce_login(redirect.trim()).await?;
-        self.save()
-    }
-
-    pub async fn load(session: &Path) -> Result<Self> {
-        let json = std::fs::read_to_string(session).context("not signed in")?;
-        let client = TidalClient::from_json(&json)?;
-        let mut tidal = Self { client, session: session.into(), http: reqwest::Client::new() };
-        tidal.refresh().await?;
+    pub async fn load(path: &Path) -> Result<Self> {
+        let json = std::fs::read_to_string(path).context("not signed in")?;
+        let session = serde_json::from_str(&json).context("please sign in again")?;
+        let tidal = Self { session: Arc::new(tokio::sync::Mutex::new(session)), path: Arc::new(path.into()) };
+        tidal.auth().await?;
         Ok(tidal)
     }
 
-    async fn refresh(&mut self) -> Result<()> {
-        if self.client.refresh_access_token(false).await? {
-            self.save()?;
+    /// The access token and account country, refreshed (and saved) first when about to expire.
+    async fn auth(&self) -> Result<(String, String, u64)> {
+        let mut s = self.session.lock().await;
+        if now() >= s.expires_at {
+            let refreshed = token(&[("grant_type", "refresh_token"), ("refresh_token", &s.refresh_token)]).await?;
+            *s = Session::from_token(&refreshed, Some(&s.refresh_token))?;
+            std::fs::write(&*self.path, serde_json::to_string(&*s)?)?;
         }
-        Ok(())
+        Ok((s.access_token.clone(), s.country.clone(), s.user_id))
     }
 
-    fn save(&self) -> Result<()> {
-        std::fs::create_dir_all(self.session.parent().unwrap_or(Path::new(".")))?;
-        std::fs::write(&self.session, self.client.get_json())?;
-        Ok(())
-    }
-
-    pub async fn stream(&mut self, track_id: u64, quality: Quality) -> Result<Stream> {
-        self.refresh().await?;
-        self.client.set_audio_quality(quality.tidlers());
-        let info = self.client.get_track_postpaywall_playback_info(track_id.to_string(), None).await?;
-        let parts = match info.manifest_parsed {
-            Some(ParsedTrackManifest::Json(m)) => Parts::Urls(m.urls),
-            // tidlers leaves XML escapes in the DASH attributes.
-            Some(ParsedTrackManifest::Dash(m)) => Parts::Segments {
-                init: m.get_init_url().context("DASH manifest has no init segment")?.replace("&amp;", "&"),
-                template: m.get_media_template().context("DASH manifest has no media template")?.replace("&amp;", "&"),
-                start: m.start_number.unwrap_or(1),
-            },
-            None => bail!("Tidal returned no stream manifest"),
-        };
-        Ok(Stream { parts })
-    }
-
-    async fn request(&mut self, method: Method, path: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
-        self.refresh().await?;
-        let token = self.client.session.auth.access_token.clone().context("not signed in")?;
-        let country = self.client.user_info.as_ref().map_or("US".into(), |u| u.country_code.clone());
-        let mut req = self
-            .http
-            .request(method, format!("{API}/{path}"))
-            .bearer_auth(token)
-            .query(&[("countryCode", country.as_str())])
-            .query(query);
+    async fn send(&self, method: Method, url: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
+        let (token, country, _) = self.auth().await?;
+        let mut req = HTTP.request(method, url).bearer_auth(token).query(&[("countryCode", country.as_str())]).query(query);
+        if url.starts_with(V2) {
+            req = req.header("x-tidal-client-version", "2026.1.5").query(&[("locale", "en_US"), ("deviceType", "BROWSER")]);
+        }
         if !form.is_empty() {
             req = req.form(form);
         }
         Ok(req.send().await?.error_for_status()?)
     }
 
-    /// A GET against Tidal's v2 API.
-    async fn get_v2(&mut self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.refresh().await?;
-        let token = self.client.session.auth.access_token.clone().context("not signed in")?;
-        let country = self.client.user_info.as_ref().map_or("US".into(), |u| u.country_code.clone());
-        let resp = self
-            .http
-            .get(format!("https://api.tidal.com/v2/{path}"))
-            .header("x-tidal-client-version", "2026.1.5")
-            .bearer_auth(token)
-            .query(&[("countryCode", country.as_str()), ("locale", "en_US"), ("deviceType", "BROWSER")])
-            .query(query)
-            .send()
-            .await?;
-        Ok(resp.error_for_status()?.json().await?)
+    async fn get(&self, url: &str, query: &[(&str, &str)]) -> Result<Value> {
+        Ok(self.send(Method::GET, url, query, &[]).await?.json().await?)
     }
 
-    async fn get(&mut self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        Ok(self.request(Method::GET, path, query, &[]).await?.json().await?)
+    /// Every item of a paged list (v1 or v2), up to `max`: the first page, then the rest a few at a time.
+    async fn items<T>(&self, url: &str, query: &[(&str, &str)], max: usize, parse: impl Fn(&Value) -> Option<T>) -> Result<Vec<T>> {
+        const PAGE: usize = 50;
+        let page = |offset: usize| async move {
+            let offset = offset.to_string();
+            let mut paged = vec![("limit", "50"), ("offset", offset.as_str())];
+            paged.extend_from_slice(query);
+            self.get(url, &paged).await
+        };
+        let first = page(0).await?;
+        let total = first["totalNumberOfItems"].as_u64().unwrap_or(0) as usize;
+        let rest: Vec<Value> = stream::iter((PAGE..total.min(max)).step_by(PAGE)).map(page).buffered(6).try_collect().await?;
+        let items = std::iter::once(first).chain(rest).flat_map(|mut page| match page["items"].take() {
+            Value::Array(items) => items,
+            _ => Vec::new(),
+        });
+        Ok(items.filter_map(|item| parse(&item)).take(max).collect())
     }
 
-    /// Every item of a paged list, up to `max`.
-    async fn items(&mut self, path: &str, query: &[(&str, &str)], max: usize) -> Result<Vec<Value>> {
-        let mut all = Vec::new();
-        loop {
-            let offset = all.len().to_string();
-            let mut page_query = vec![("limit", "50"), ("offset", offset.as_str())];
-            page_query.extend_from_slice(query);
-            let page = self.get(path, &page_query).await?;
-            let items = page["items"].as_array().cloned().unwrap_or_default();
-            let total = page["totalNumberOfItems"].as_u64().unwrap_or(0) as usize;
-            let empty = items.is_empty();
-            all.extend(items);
-            if empty || all.len() >= total.min(max) {
-                return Ok(all);
-            }
+    pub async fn stream(&self, track_id: u64, quality: Quality) -> Result<Parts> {
+        let query = [("audioquality", quality.api()), ("playbackmode", "STREAM"), ("assetpresentation", "FULL")];
+        let info = self.get(&format!("{V1}/tracks/{track_id}/playbackinfopostpaywall"), &query).await?;
+        let manifest = STANDARD.decode(info["manifest"].as_str().context("no stream manifest")?)?;
+        let manifest = String::from_utf8(manifest)?;
+        if let Ok(json) = serde_json::from_str::<Value>(&manifest) {
+            return Ok(Parts::Urls(json["urls"].as_array().context("no stream URLs")?.iter().map(text).collect()));
         }
+        dash(&manifest).context("unreadable stream manifest")
     }
 
-    pub async fn search(&mut self, query: &str) -> Result<Results> {
+    pub async fn search(&self, query: &str) -> Result<Results> {
         let types = "ARTISTS,ALBUMS,TRACKS,PLAYLISTS";
-        let v = self.get("search", &[("query", query), ("types", types), ("limit", "20")]).await?;
+        let v = self.get(&format!("{V1}/search"), &[("query", query), ("types", types), ("limit", "20")]).await?;
         Ok(Results {
             artists: list(&v["artists"]["items"], artist),
             albums: list(&v["albums"]["items"], album),
@@ -265,41 +334,34 @@ impl Tidal {
         })
     }
 
-    pub async fn album(&mut self, id: u64) -> Result<(Album, Vec<Track>)> {
-        let info = self.get(&format!("albums/{id}"), &[]).await?;
-        let items = self.items(&format!("albums/{id}/items"), &[], 1000).await?;
-        Ok((album(&info).context("bad album")?, items.iter().filter_map(track).collect()))
+    pub async fn album(&self, id: u64) -> Result<(Album, Vec<Track>)> {
+        let url = format!("{V1}/albums/{id}");
+        let items = format!("{url}/items");
+        let (info, tracks) = tokio::try_join!(self.get(&url, &[]), self.items(&items, &[], 1000, track))?;
+        Ok((album(&info).context("bad album")?, tracks))
     }
 
-    pub async fn artist(&mut self, id: u64) -> Result<(Artist, Vec<Track>, Vec<Album>)> {
-        let info = self.get(&format!("artists/{id}"), &[]).await?;
-        let top = self.get(&format!("artists/{id}/toptracks"), &[("limit", "10")]).await?;
-        let albums = self.items(&format!("artists/{id}/albums"), &[], 200).await?;
-        let albums = albums.iter().filter_map(album).collect();
+    pub async fn artist(&self, id: u64) -> Result<(Artist, Vec<Track>, Vec<Album>)> {
+        let url = format!("{V1}/artists/{id}");
+        let (top_url, albums_url) = (format!("{url}/toptracks"), format!("{url}/albums"));
+        let (info, top, albums) = tokio::try_join!(
+            self.get(&url, &[]),
+            self.get(&top_url, &[("limit", "10")]),
+            self.items(&albums_url, &[], 200, album)
+        )?;
         Ok((artist(&info).context("bad artist")?, list(&top["items"], track), albums))
     }
 
-    pub async fn playlist(&mut self, id: &str) -> Result<(Playlist, Vec<Track>)> {
-        let info = self.get(&format!("playlists/{id}"), &[]).await?;
-        let items = self.items(&format!("playlists/{id}/items"), &[], 10_000).await?;
-        Ok((playlist(&info).context("bad playlist")?, items.iter().filter_map(track).collect()))
+    pub async fn playlist(&self, id: &str) -> Result<(Playlist, Vec<Track>)> {
+        let url = format!("{V1}/playlists/{id}");
+        let items = format!("{url}/items");
+        let (info, tracks) = tokio::try_join!(self.get(&url, &[]), self.items(&items, &[], 10_000, track))?;
+        Ok((playlist(&info).context("bad playlist")?, tracks))
     }
 
     /// Tidal's personal home feed: recently played, your top playlists, mixes and the rest.
-    pub async fn home(&mut self) -> Result<Vec<Shelf>> {
-        self.refresh().await?;
-        let token = self.client.session.auth.access_token.clone().context("not signed in")?;
-        let country = self.client.user_info.as_ref().map_or("US".into(), |u| u.country_code.clone());
-        let query = [("countryCode", country.as_str()), ("locale", "en_US"), ("deviceType", "BROWSER"), ("platform", "WEB"), ("limit", "20")];
-        let resp = self
-            .http
-            .get("https://api.tidal.com/v2/home/feed/static")
-            .header("x-tidal-client-version", "2026.1.5")
-            .bearer_auth(token)
-            .query(&query)
-            .send()
-            .await?;
-        let feed: Value = resp.error_for_status()?.json().await?;
+    pub async fn home(&self) -> Result<Vec<Shelf>> {
+        let feed = self.get(&format!("{V2}/home/feed/static"), &[("platform", "WEB"), ("limit", "20")]).await?;
         let shelves = feed["items"].as_array().into_iter().flatten().filter_map(|module| {
             let mut shelf = Shelf { title: text(&module["title"]), cards: Vec::new(), tracks: Vec::new() };
             for item in module["items"].as_array()? {
@@ -318,22 +380,18 @@ impl Tidal {
         Ok(shelves.collect())
     }
 
-    pub async fn mix_tracks(&mut self, id: &str) -> Result<Vec<Track>> {
-        Ok(self.items(&format!("mixes/{id}/items"), &[], 1000).await?.iter().filter_map(track).collect())
+    pub async fn mix_tracks(&self, id: &str) -> Result<Vec<Track>> {
+        self.items(&format!("{V1}/mixes/{id}/items"), &[], 1000, track).await
     }
 
-    /// Tracks like this one, for radio.
-    pub async fn track_radio(&mut self, id: u64) -> Result<Vec<Track>> {
-        Ok(list(&self.get(&format!("tracks/{id}/radio"), &[("limit", "100")]).await?["items"], track))
-    }
-
-    pub async fn artist_radio(&mut self, id: u64) -> Result<Vec<Track>> {
-        Ok(list(&self.get(&format!("artists/{id}/radio"), &[("limit", "100")]).await?["items"], track))
+    /// Tracks like this one ("tracks") or this artist's ("artists"), for radio.
+    pub async fn radio(&self, kind: &str, id: u64) -> Result<Vec<Track>> {
+        Ok(list(&self.get(&format!("{V1}/{kind}/{id}/radio"), &[("limit", "100")]).await?["items"], track))
     }
 
     /// None when the track has no lyrics.
-    pub async fn lyrics(&mut self, id: u64) -> Result<Option<Lyrics>> {
-        let v = match self.get(&format!("tracks/{id}/lyrics"), &[]).await {
+    pub async fn lyrics(&self, id: u64) -> Result<Option<Lyrics>> {
+        let v = match self.get(&format!("{V1}/tracks/{id}/lyrics"), &[]).await {
             Ok(v) => v,
             Err(e) if e.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status) == Some(reqwest::StatusCode::NOT_FOUND) => {
                 return Ok(None);
@@ -344,69 +402,76 @@ impl Tidal {
         Ok(Some(Lyrics { synced, text: text(&v["lyrics"]) }))
     }
 
-    fn user(&self) -> Result<u64> {
-        let info = self.client.user_info.as_ref().map(|u| u.user_id);
-        info.or(self.client.session.auth.user_id).context("not signed in")
+    async fn user(&self) -> Result<String> {
+        Ok(format!("{V1}/users/{}", self.auth().await?.2))
     }
 
-    /// A favorites list, newest first, as `{"created": ..., "item": {...}}` entries.
-    async fn favorites(&mut self, kind: &str) -> Result<Vec<Value>> {
-        let path = format!("users/{}/favorites/{kind}", self.user()?);
-        self.items(&path, &[("order", "DATE"), ("orderDirection", "DESC")], 10_000).await
+    /// A favorites list, newest first; entries are `{"created": ..., "item": {...}}`.
+    async fn favorites<T>(&self, kind: &str, parse: impl Fn(&Value) -> Option<T>) -> Result<Vec<T>> {
+        let url = format!("{}/favorites/{kind}", self.user().await?);
+        self.items(&url, &[("order", "DATE"), ("orderDirection", "DESC")], 10_000, parse).await
     }
 
-    pub async fn favorite_tracks(&mut self) -> Result<Vec<Track>> {
-        Ok(self.favorites("tracks").await?.iter().filter_map(track).collect())
+    pub async fn favorite_tracks(&self) -> Result<Vec<Track>> {
+        self.favorites("tracks", track).await
     }
 
-    pub async fn favorite_albums(&mut self) -> Result<Vec<Album>> {
-        Ok(self.favorites("albums").await?.iter().filter_map(|v| album(&v["item"])).collect())
+    pub async fn favorite_albums(&self) -> Result<Vec<Album>> {
+        self.favorites("albums", |v| album(&v["item"])).await
     }
 
-    pub async fn favorite_artists(&mut self) -> Result<Vec<Artist>> {
-        Ok(self.favorites("artists").await?.iter().filter_map(|v| artist(&v["item"])).collect())
+    pub async fn favorite_artists(&self) -> Result<Vec<Artist>> {
+        self.favorites("artists", |v| artist(&v["item"])).await
     }
 
     /// A playlist folder's folders and playlists, newest first; "root" is the top level.
-    pub async fn folder(&mut self, id: &str) -> Result<Vec<Entry>> {
-        let (mut entries, mut seen) = (Vec::new(), 0);
-        loop {
-            let offset = seen.to_string();
-            let query = [("folderId", id), ("includeOnly", ""), ("limit", "50"), ("offset", &offset), ("order", "DATE"), ("orderDirection", "DESC")];
-            let page = self.get_v2("my-collection/playlists/folders", &query).await?;
-            let items = page["items"].as_array().cloned().unwrap_or_default();
-            seen += items.len();
-            for item in &items {
-                match item["itemType"].as_str() {
-                    Some("FOLDER") => entries.push(Entry::Folder {
-                        id: text(&item["data"]["id"]),
-                        name: text(&item["name"]),
-                        count: item["data"]["totalNumberOfItems"].as_u64().unwrap_or(0),
-                    }),
-                    Some("PLAYLIST") => entries.extend(playlist(&item["data"]).map(Entry::Playlist)),
-                    _ => {}
-                }
-            }
-            if items.is_empty() || seen >= page["totalNumberOfItems"].as_u64().unwrap_or(0) as usize {
-                return Ok(entries);
-            }
-        }
+    pub async fn folder(&self, id: &str) -> Result<Vec<Entry>> {
+        let query = [("folderId", id), ("includeOnly", ""), ("order", "DATE"), ("orderDirection", "DESC")];
+        let entry = |item: &Value| match item["itemType"].as_str()? {
+            "FOLDER" => Some(Entry::Folder {
+                id: text(&item["data"]["id"]),
+                name: text(&item["name"]),
+                count: item["data"]["totalNumberOfItems"].as_u64().unwrap_or(0),
+            }),
+            "PLAYLIST" => playlist(&item["data"]).map(Entry::Playlist),
+            _ => None,
+        };
+        self.items(&format!("{V2}/my-collection/playlists/folders"), &query, 1000, entry).await
     }
 
-    pub async fn favorite_ids(&mut self) -> Result<HashSet<u64>> {
-        let v = self.get(&format!("users/{}/favorites/ids", self.user()?), &[]).await?;
+    pub async fn favorite_ids(&self) -> Result<HashSet<u64>> {
+        let v = self.get(&format!("{}/favorites/ids", self.user().await?), &[]).await?;
         Ok(v["TRACK"].as_array().into_iter().flatten().filter_map(|id| id.as_str()?.parse().ok()).collect())
     }
 
-    pub async fn set_favorite(&mut self, id: u64, on: bool) -> Result<()> {
-        let path = format!("users/{}/favorites/tracks", self.user()?);
+    pub async fn set_favorite(&self, id: u64, on: bool) -> Result<()> {
+        let url = format!("{}/favorites/tracks", self.user().await?);
         if on {
-            self.request(Method::POST, &path, &[], &[("trackIds", &id.to_string())]).await?;
+            self.send(Method::POST, &url, &[], &[("trackIds", &id.to_string())]).await?;
         } else {
-            self.request(Method::DELETE, &format!("{path}/{id}"), &[], &[]).await?;
+            self.send(Method::DELETE, &format!("{url}/{id}"), &[], &[]).await?;
         }
         Ok(())
     }
+}
+
+/// A DASH manifest's segment template, and its segment count from the timeline.
+fn dash(xml: &str) -> Option<Parts> {
+    let attr = |tag: &str, name: &str| {
+        let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(tag[at..].split('"').next()?.replace("&amp;", "&"))
+    };
+    let count = xml
+        .split("<S ")
+        .skip(1)
+        .map(|s| 1 + attr(&format!(" {}", &s[..s.find('>').unwrap_or(s.len())]), "r").and_then(|r| r.parse::<u32>().ok()).unwrap_or(0))
+        .sum();
+    Some(Parts::Segments {
+        init: attr(xml, "initialization")?,
+        template: attr(xml, "media")?,
+        start: attr(xml, "startNumber").and_then(|n| n.parse().ok()).unwrap_or(1),
+        count,
+    })
 }
 
 /// `[mm:ss.xx] words` lines.
@@ -495,8 +560,4 @@ fn playlist(v: &Value) -> Option<Playlist> {
         cover: image_id(&v["squareImage"]).or_else(|| image_id(&v["image"])),
         count: v["numberOfTracks"].as_u64().unwrap_or(0),
     })
-}
-
-pub fn session_path(dir: &Path) -> PathBuf {
-    dir.join("data").join("session.json")
 }
