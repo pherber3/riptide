@@ -1,7 +1,7 @@
 use egui::{Color32, Context, RichText, Ui, vec2};
 
 use crate::app::Action;
-use crate::theme::{DANGER, DIM, HOVER, Icon, SECONDARY, SURFACE, TEXT, bold, medium, semibold};
+use crate::theme::{p, Icon, bold, medium, semibold};
 use crate::widgets::{icon_button, switch};
 
 /// The one dialog that can be open at a time.
@@ -44,22 +44,22 @@ pub fn confirm(title: String, text: &'static str, then: Action) -> Action {
 pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
     let (accepted, dismissed) = match dialog {
         Dialog::Confirm { title, text, .. } => modal(ctx, 400.0, title, |ui| {
-            ui.label(RichText::new(*text).size(14.0).color(SECONDARY));
+            ui.label(RichText::new(*text).size(14.0).color(p().secondary));
             ui.add_space(20.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let yes = ui.add(button("Delete", Color32::WHITE, DANGER)).clicked();
-                (yes, ui.add(button("Cancel", TEXT, HOVER)).clicked())
+                let yes = ui.add(button("Delete", Color32::WHITE, p().danger)).clicked();
+                (yes, ui.add(button("Cancel", p().text, p().surface_hover)).clicked())
             })
             .inner
         }),
         Dialog::Credits(title, credits) => modal(ctx, 440.0, &format!("Credits · {title}"), |ui| {
             egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
                 if credits.is_empty() {
-                    ui.label(RichText::new("Tidal has no credits for this track.").color(SECONDARY));
+                    ui.label(RichText::new("Tidal has no credits for this track.").color(p().secondary));
                 }
                 for (role, names) in credits.iter() {
-                    ui.label(RichText::new(role.to_uppercase()).font(semibold(11.0)).color(DIM));
-                    ui.label(RichText::new(names).size(15.0).color(TEXT));
+                    ui.label(RichText::new(role.to_uppercase()).font(semibold(11.0)).color(p().dim));
+                    ui.label(RichText::new(names).size(15.0).color(p().text));
                     ui.add_space(10.0);
                 }
             });
@@ -90,15 +90,15 @@ fn playlist_form(ui: &mut Ui, form: &mut PlaylistForm) -> bool {
         ui.add_space(10.0);
         let description = egui::TextEdit::multiline(&mut form.description).hint_text("Write a description").char_limit(500).desired_rows(4);
         ui.add(description.margin(vec2(14.0, 12.0)).desired_width(f32::INFINITY));
-        ui.label(RichText::new(format!("{}/500 characters", form.description.chars().count())).size(12.0).color(DIM));
+        ui.label(RichText::new(format!("{}/500 characters", form.description.chars().count())).size(12.0).color(p().dim));
         ui.add_space(12.0);
-        egui::Frame::new().fill(HOVER).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+        egui::Frame::new().fill(p().surface_hover).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
             egui::Sides::new().show(
                 ui,
                 |ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Make it public").font(semibold(15.0)).color(TEXT));
-                        ui.label(RichText::new("Your playlist will be visible on your profile and to anyone.").size(13.0).color(SECONDARY));
+                        ui.label(RichText::new("Make it public").font(semibold(15.0)).color(p().text));
+                        ui.label(RichText::new("Your playlist will be visible on your profile and to anyone.").size(13.0).color(p().secondary));
                     });
                 },
                 |ui| {
@@ -111,20 +111,20 @@ fn playlist_form(ui: &mut Ui, form: &mut PlaylistForm) -> bool {
     }
     ui.add_space(16.0);
     let ready = !form.title.trim().is_empty();
-    let save = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add_enabled(ready, button("Save", Color32::BLACK, TEXT)).clicked());
+    let save = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add_enabled(ready, button("Save", p().window, p().text)).clicked());
     ready && (save.inner || enter)
 }
 
 /// A dialog: a heading with a close button over `body`, which says whether it was accepted.
 /// Returns that, and whether the dialog was dismissed (the close button, Esc, or a click outside).
 fn modal(ctx: &Context, width: f32, heading: &str, body: impl FnOnce(&mut Ui) -> (bool, bool)) -> (bool, bool) {
-    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
+    let frame = egui::Frame::new().fill(p().surface).corner_radius(14).inner_margin(24);
     let modal = egui::Modal::new(egui::Id::new("dialog")).frame(frame).show(ctx, |ui| {
         ui.set_width(width);
         let (_, close) = egui::Sides::new().shrink_left().show(
             ui,
-            |ui| ui.add(egui::Label::new(RichText::new(heading).font(bold(20.0)).color(TEXT)).truncate()),
-            |ui| icon_button(ui, Icon::Close, 18.0, SECONDARY).clicked(),
+            |ui| ui.add(egui::Label::new(RichText::new(heading).font(bold(20.0)).color(p().text)).truncate()),
+            |ui| icon_button(ui, Icon::Close, 18.0, p().secondary).clicked(),
         );
         ui.add_space(14.0);
         let (accepted, cancelled) = body(ui);

@@ -26,6 +26,7 @@ use crate::lastfm::LastFm;
 use crate::player::{Cmd, Player};
 use crate::queue::Queue;
 use crate::settings::Settings;
+use crate::theme;
 use crate::tidal::{self, Item, Lyrics, Quality, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::widgets::art;
@@ -137,16 +138,28 @@ pub struct App {
     quitting: bool,
     /// Scrobbling, when `data/lastfm.txt` has an API account.
     lastfm: Option<LastFm>,
+    /// The palette files in `data/themes`, the shared ones among them.
+    themes: fastframe_theme::Catalog<theme::Palette>,
 }
 
 impl App {
     /// The app in `home` (beside the exe): `data` for small files, `cache` for audio and art.
     pub fn new(cc: &eframe::CreationContext<'_>, home: &Path, settings: Settings) -> Result<Self> {
         let ctx = cc.egui_ctx.clone();
-        crate::theme::install(&ctx);
+        let data = home.join("data");
+        // The chosen theme is read now, so the first frame is already in its colours.
+        let file = settings.theme.as_ref().and_then(|name| std::fs::read_to_string(data.join("themes").join(name)).ok());
+        theme::install(&ctx, file.and_then(|text| fastframe_theme::parse_palette(&text).ok()).unwrap_or(theme::DARK));
+        let mut themes = fastframe_theme::Catalog::default();
+        themes.enable_desktop_themes(fastframe_theme::DesktopThemes {
+            slug: "riptide",
+            omarchy_template: fastframe_theme::omarchy::BASE_TEMPLATE,
+            omarchy_previous_templates: &[],
+            presets: true,
+        });
         crate::fonts::install(&ctx);
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
-        let (data, cache) = (home.join("data"), home.join("cache"));
+        let cache = home.join("cache");
         std::fs::create_dir_all(&cache)?;
         let art_dir = cache.join("art");
         let evicting = (cache.clone(), art_dir.clone());
@@ -169,7 +182,8 @@ impl App {
             move || ctx.request_repaint()
         });
         let (queue, restored) = Queue::load(&data.join("queue.json")).map_or((Queue::default(), None), |(q, at)| (q, Some(at)));
-        let app = Self {
+        let mut app = Self {
+            themes,
             busy: tidal::session_path(&data).exists(),
             lastfm: LastFm::load(LastFm::path(&data)),
             tray: window::tray(&ctx),
@@ -210,6 +224,7 @@ impl App {
         if let Some(lastfm) = app.scrobbler() {
             app.run(async move { lastfm.scrobble(None).await }, None);
         }
+        app.scan_themes();
         if app.busy {
             let session = tidal::session_path(&app.data);
             app.spawn(async move {
@@ -263,6 +278,22 @@ impl App {
                 }
             }))
         });
+    }
+
+    /// Lists the palette files again, picking up any added or edited.
+    fn scan_themes(&mut self) {
+        let ctx = self.ctx.clone();
+        let waker = fastframe_theme::Waker::new(move || ctx.request_repaint());
+        self.themes.start(self.data.join("themes"), self.settings.theme.clone(), &waker);
+    }
+
+    /// The chosen theme's colours, or Riptide's own.
+    fn apply_theme(&self) {
+        let chosen = self.settings.theme.as_ref().and_then(|name| self.themes.find(name));
+        let palette = chosen.map_or(theme::DARK, |theme| theme.palette);
+        if palette != theme::p() {
+            theme::apply(&self.ctx, palette);
+        }
     }
 
     fn note(&mut self, notice: Option<String>) {
@@ -335,6 +366,9 @@ impl App {
         match action {
             Action::Open(source) => {
                 (self.loading, self.message, self.lyrics_open) = (true, None, false);
+                if source == Source::Settings {
+                    self.scan_themes();
+                }
                 self.spawn(async move {
                     let page = load(tidal, source).await?;
                     // Results for an older query than the one typed now are dropped.
@@ -453,6 +487,9 @@ impl eframe::App for App {
             update(self);
         }
         let ctx = ui.ctx().clone();
+        if self.themes.poll() {
+            self.apply_theme();
+        }
         self.search(&ctx);
         self.media_keys();
         crate::art::sweep(&ctx);
@@ -491,8 +528,9 @@ impl eframe::App for App {
         // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
         let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
         let mood = cover.and_then(|url| crate::art::tint(&url));
-        let before = (self.settings.device.clone(), self.settings.normalize, self.settings.close_to_tray);
-        self.player_bar(ui, mood, &mut actions);
+        let before = (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray);
+        // The bar takes the tint too, where its text stays light on it.
+        self.player_bar(ui, mood.filter(|_| theme::p().dark), &mut actions);
         if self.lyrics_open {
             self.now_playing(ui, mood, &mut actions);
         } else {
@@ -501,10 +539,11 @@ impl eframe::App for App {
             self.content(ui, &mut actions);
         }
         // What the settings page changed takes effect, and is kept.
-        if before != (self.settings.device.clone(), self.settings.normalize, self.settings.close_to_tray) {
+        if before != (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray) {
             if before.0 != self.settings.device {
                 self.player.send(Cmd::Device(self.settings.device.clone()));
             }
+            self.apply_theme();
             self.apply_gain();
             self.settings.save(&self.data);
         }

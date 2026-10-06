@@ -2,7 +2,7 @@ use egui::{Align, Color32, Layout, Rect, Response, RichText, Sense, Stroke, Ui, 
 
 use crate::app::{Action, Body, Head, Library, Page, Source};
 use crate::dialogs::{self, Target};
-use crate::theme::{ACCENT, DANGER, DIM, GOLD, HOVER, Icon, LINE, SECONDARY, SURFACE, TEXT, bold, medium, semibold};
+use crate::theme::{p, GOLD, TEAL, Icon, bold, medium, semibold};
 use crate::tidal::{self, Card, Item, Quality, Track};
 use crate::view::{Sort, View, in_order, ordered};
 
@@ -20,8 +20,8 @@ const KEEP_OPEN: egui::PopupCloseBehavior = egui::PopupCloseBehavior::CloseOnCli
 pub fn tier_color(quality: Quality) -> Color32 {
     match quality {
         Quality::Max => GOLD,
-        Quality::High => ACCENT,
-        Quality::Low => SECONDARY,
+        Quality::High => TEAL,
+        Quality::Low => p().secondary,
     }
 }
 
@@ -37,7 +37,7 @@ pub fn clock(seconds: f64) -> String {
 
 pub fn section(ui: &mut Ui, title: &str) {
     ui.add_space(28.0);
-    ui.label(RichText::new(title).font(bold(22.0)).color(TEXT));
+    ui.label(RichText::new(title).font(bold(22.0)).color(p().text));
     ui.add_space(10.0);
 }
 
@@ -49,7 +49,7 @@ pub fn clickable(response: Response) -> Response {
 pub fn link_text(ui: &mut Ui, text: RichText) -> Response {
     let response = ui.add(egui::Label::new(text).truncate().selectable(false).sense(Sense::click()));
     if response.hovered() {
-        ui.painter().hline(response.rect.x_range(), response.rect.bottom() - 1.0, Stroke::new(1.0, TEXT));
+        ui.painter().hline(response.rect.x_range(), response.rect.bottom() - 1.0, Stroke::new(1.0, p().text));
     }
     clickable(response)
 }
@@ -57,7 +57,7 @@ pub fn link_text(ui: &mut Ui, text: RichText) -> Response {
 /// An icon that brightens to white on hover when it rests grey.
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, color: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size + 10.0), Sense::click());
-    let color = if response.hovered() { color.lerp_to_gamma(Color32::WHITE, 0.5) } else { color };
+    let color = if response.hovered() { color.lerp_to_gamma(p().text, 0.5) } else { color };
     icon.image(color, size).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
     clickable(response)
 }
@@ -67,10 +67,10 @@ pub fn pill(ui: &mut Ui, icon: Icon, text: &str, primary: bool) -> Response {
     let galley = ui.painter().layout_no_wrap(text.into(), semibold(14.0), Color32::PLACEHOLDER);
     let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 70.0, 40.0), Sense::click());
     let (fill, ink) = match (primary, response.hovered()) {
-        (true, false) => (TEXT, Color32::BLACK),
-        (true, true) => (Color32::from_gray(214), Color32::BLACK),
-        (false, false) => (SURFACE, TEXT),
-        (false, true) => (HOVER, TEXT),
+        (true, false) => (p().text, p().window),
+        (true, true) => (p().text.gamma_multiply(0.85), p().window),
+        (false, false) => (p().surface, p().text),
+        (false, true) => (p().surface_hover, p().text),
     };
     ui.painter().rect_filled(rect, 20.0, fill);
     icon.image(ink, 16.0).paint_at(ui, Rect::from_min_size(rect.left_center() + vec2(22.0, -8.0), Vec2::splat(16.0)));
@@ -80,11 +80,11 @@ pub fn pill(ui: &mut Ui, icon: Icon, text: &str, primary: bool) -> Response {
 
 /// A rounded text field with a search icon.
 pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, id: egui::Id) -> Response {
-    let frame = egui::Frame::new().fill(SURFACE).corner_radius(18).inner_margin(egui::Margin::symmetric(12, 7));
+    let frame = egui::Frame::new().fill(p().surface).corner_radius(18).inner_margin(egui::Margin::symmetric(12, 7));
     frame
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(Icon::Search.image(SECONDARY, 15.0));
+                ui.add(Icon::Search.image(p().secondary, 15.0));
                 ui.add(egui::TextEdit::singleline(text).id(id).hint_text(hint).frame(egui::Frame::NONE).desired_width(width - 23.0))
             })
             .inner
@@ -103,10 +103,10 @@ pub fn bar(ui: &mut Ui, value: &mut f64, max: f64, width: f32, enabled: bool) ->
     let active = enabled && (response.hovered() || response.dragged());
     let track = Rect::from_center_size(rect.center(), vec2(width, 4.0));
     let x = track.left() + track.width() * (*value / max.max(1e-9)).clamp(0.0, 1.0) as f32;
-    ui.painter().rect_filled(track, 2.0, HOVER);
-    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), 2.0, if active { TEXT } else { SECONDARY });
+    ui.painter().rect_filled(track, 2.0, p().surface_hover);
+    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), 2.0, if active { p().text } else { p().secondary });
     if active {
-        ui.painter().circle_filled(pos2(x, track.center().y), 6.0, TEXT);
+        ui.painter().circle_filled(pos2(x, track.center().y), 6.0, p().text);
     }
     if enabled { clickable(response) } else { response }
 }
@@ -119,9 +119,9 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response
     }
     let hovered = response.hovered();
     if selected || hovered {
-        ui.painter().rect_filled(rect, 8.0, if selected { HOVER } else { SURFACE });
+        ui.painter().rect_filled(rect, 8.0, if selected { p().surface_hover } else { p().surface });
     }
-    let color = if selected || hovered { TEXT } else { SECONDARY };
+    let color = if selected || hovered { p().text } else { p().secondary };
     icon.image(color, 18.0).paint_at(ui, Rect::from_min_size(rect.left_center() + vec2(10.0, -9.0), Vec2::splat(18.0)));
     let text = egui::WidgetText::from(RichText::new(text).font(medium(14.0)));
     let galley = text.into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width() - 48.0, egui::TextStyle::Body);
@@ -144,7 +144,7 @@ pub fn heart(ui: &mut Ui, id: u64, library: &Library, visible: bool, actions: &m
         ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
         return;
     }
-    let (icon, color, hint) = if on { (Icon::HeartFilled, ACCENT, "Remove from your collection") } else { (Icon::Heart, SECONDARY, "Add to your collection") };
+    let (icon, color, hint) = if on { (Icon::HeartFilled, p().accent, "Remove from your collection") } else { (Icon::Heart, p().secondary, "Add to your collection") };
     if icon_button(ui, icon, 16.0, color).on_hover_text(hint).clicked() {
         actions.push(Action::Save(item, !on));
     }
@@ -159,7 +159,7 @@ pub fn picture(ui: &mut Ui, url: Option<String>, side: f32, round: bool) -> Resp
 /// Artwork, loaded only once it scrolls into view so long shelves and grids don't fill memory.
 fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
     let radius = if round { rect.width() / 2.0 } else { (rect.width() / 28.0).clamp(4.0, 8.0) };
-    ui.painter().rect_filled(rect, radius, SURFACE);
+    ui.painter().rect_filled(rect, radius, p().surface);
     if let Some(url) = url
         && ui.is_rect_visible(rect)
     {
@@ -176,15 +176,15 @@ fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
 fn arrow(ui: &Ui, c: egui::Pos2, up: bool) {
     let (tip, base) = if up { (-3.0, 2.0) } else { (3.0, -2.0) };
     let points = vec![c + vec2(-4.0, base), c + vec2(4.0, base), c + vec2(0.0, tip)];
-    ui.painter().add(egui::Shape::convex_polygon(points, ACCENT, Stroke::NONE));
+    ui.painter().add(egui::Shape::convex_polygon(points, p().accent, Stroke::NONE));
 }
 
 /// The white round play (or pause) button, a little bigger while hovered.
 pub fn play_disc(ui: &Ui, center: egui::Pos2, radius: f32, hovered: bool, icon: Icon) {
-    let (radius, fill) = if hovered { (radius + 1.0, Color32::WHITE) } else { (radius, TEXT) };
+    let (radius, fill) = if hovered { (radius + 1.0, p().text.gamma_multiply(0.85)) } else { (radius, p().text) };
     ui.painter().circle_filled(center, radius, fill);
     let nudge = if icon == Icon::Play { 1.0 } else { 0.0 };
-    icon.image(Color32::BLACK, 16.0).paint_at(ui, Rect::from_center_size(center + vec2(nudge, 0.0), Vec2::splat(16.0)));
+    icon.image(p().window, 16.0).paint_at(ui, Rect::from_center_size(center + vec2(nudge, 0.0), Vec2::splat(16.0)));
 }
 
 /// Artwork with a title and subtitle. The whole card highlights on hover and opens on click; a play
@@ -206,16 +206,16 @@ fn card(ui: &mut Ui, card: &Card, actions: &mut Vec<Action>) {
     let hovered = response.hovered();
     let painter = ui.painter();
     if hovered {
-        painter.rect_filled(rect, 10.0, SURFACE);
+        painter.rect_filled(rect, 10.0, p().surface);
     }
     let cover = Rect::from_min_size(rect.min + vec2(pad, pad), Vec2::splat(CARD));
     paint_picture(ui, image, cover, round);
     if let Card::Folder { .. } = card {
-        Icon::Folder.image(DIM, 56.0).paint_at(ui, Rect::from_center_size(cover.center(), Vec2::splat(56.0)));
+        Icon::Folder.image(p().dim, 56.0).paint_at(ui, Rect::from_center_size(cover.center(), Vec2::splat(56.0)));
     }
     let line = |text: RichText| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), CARD, egui::TextStyle::Body);
-    painter.galley(cover.left_bottom() + vec2(0.0, 8.0), line(RichText::new(title).font(semibold(14.0))), TEXT);
-    painter.galley(cover.left_bottom() + vec2(0.0, 27.0), line(RichText::new(subtitle).size(13.0)), SECONDARY);
+    painter.galley(cover.left_bottom() + vec2(0.0, 8.0), line(RichText::new(title).font(semibold(14.0))), p().text);
+    painter.galley(cover.left_bottom() + vec2(0.0, 27.0), line(RichText::new(subtitle).size(13.0)), p().secondary);
     let play = Source::play(card);
     let button = cover.right_bottom() - vec2(30.0, 30.0);
     let on_button = play.is_some() && response.hover_pos().is_some_and(|p| p.distance(button) <= 20.0);
@@ -254,7 +254,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: 
                 start = Some(Start::Radio);
             }
             if let Some(item) = &head.item
-                && icon_button(ui, Icon::Copy, 20.0, SECONDARY).on_hover_text("Copy link").clicked()
+                && icon_button(ui, Icon::Copy, 20.0, p().secondary).on_hover_text("Copy link").clicked()
             {
                 actions.push(Action::CopyLink(link(item)));
             }
@@ -275,7 +275,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: 
                         (_, false) => Icon::Plus,
                     };
                     let hint = if on { format!("Remove from your {list}") } else { format!("Add to your {list}") };
-                    if icon_button(ui, icon, 22.0, if on { ACCENT } else { SECONDARY }).on_hover_text(hint).clicked() {
+                    if icon_button(ui, icon, 22.0, if on { p().accent } else { p().secondary }).on_hover_text(hint).clicked() {
                         actions.push(Action::Save(item.clone(), !on));
                     }
                 }
@@ -294,16 +294,16 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: 
                     buttons(ui);
                     ui.add_space(12.0);
                     if !head.subtitle.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(&head.subtitle).size(15.0).color(SECONDARY)).truncate());
+                        ui.add(egui::Label::new(RichText::new(&head.subtitle).size(15.0).color(p().secondary)).truncate());
                     }
-                    ui.add(egui::Label::new(RichText::new(&head.title).font(bold(40.0)).color(TEXT)).truncate());
-                    ui.label(RichText::new(head.kind).font(semibold(12.0)).color(SECONDARY));
+                    ui.add(egui::Label::new(RichText::new(&head.title).font(bold(40.0)).color(p().text)).truncate());
+                    ui.label(RichText::new(head.kind).font(semibold(12.0)).color(p().secondary));
                 });
             });
         }
         None => {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&head.title).font(bold(32.0)).color(TEXT));
+                ui.label(RichText::new(&head.title).font(bold(32.0)).color(p().text));
                 ui.add_space(16.0);
                 buttons(ui);
             });
@@ -315,7 +315,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: 
 
 /// The ⋯ menu of one of the user's own playlists.
 fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: &mut Vec<Action>) {
-    let more = egui::Button::image(Icon::More.image(SECONDARY, 22.0)).frame(false);
+    let more = egui::Button::image(Icon::More.image(p().secondary, 22.0)).frame(false);
     egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| playlist_actions(ui, id, title, folders, actions));
 }
 
@@ -334,16 +334,16 @@ pub fn playlist_actions(ui: &mut Ui, id: &str, title: &str, folders: &[Card], ac
     });
     let text = "This deletes the playlist from your Tidal account. It can't be undone.";
     let delete = dialogs::confirm(format!("Delete {title}?"), text, Action::DeletePlaylist(id.into()));
-    menu_item(ui, actions, RichText::new("Delete playlist").color(DANGER), delete);
+    menu_item(ui, actions, RichText::new("Delete playlist").color(p().danger), delete);
 }
 
 /// An on/off switch.
 pub fn switch(ui: &mut Ui, on: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
     let t = ui.ctx().animate_bool(response.id, on);
-    ui.painter().rect_filled(rect, 11.0, HOVER.lerp_to_gamma(ACCENT, t));
+    ui.painter().rect_filled(rect, 11.0, p().surface_hover.lerp_to_gamma(p().accent, t));
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, TEXT);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, p().text);
     clickable(response)
 }
 
@@ -366,7 +366,7 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
                     if view.sort != Sort::Added || view.reverse {
                         let own = if view.key == "playlist" { "Playlist order" } else { "Recently added" };
                         ui.add_space(8.0);
-                        if link_text(ui, RichText::new(format!("Back to {}", own.to_lowercase())).color(SECONDARY)).on_hover_text(own).clicked() {
+                        if link_text(ui, RichText::new(format!("Back to {}", own.to_lowercase())).color(p().secondary)).on_hover_text(own).clicked() {
                             actions.push(Action::ResetSort);
                         }
                     }
@@ -449,10 +449,10 @@ fn shelf_title(ui: &mut Ui, title: &str, more: Option<&str>, actions: &mut Vec<A
     }
     ui.add_space(28.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).font(bold(22.0)).color(TEXT));
+        ui.label(RichText::new(title).font(bold(22.0)).color(p().text));
         if let Some(more) = more {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if link_text(ui, RichText::new("View all").font(semibold(13.0)).color(SECONDARY)).clicked() {
+                if link_text(ui, RichText::new("View all").font(semibold(13.0)).color(p().secondary)).clicked() {
                     actions.push(Action::Open(Source::Page(more.into())));
                 }
             });
@@ -465,8 +465,8 @@ fn shelf_title(ui: &mut Ui, title: &str, more: Option<&str>, actions: &mut Vec<A
 fn chip(ui: &mut Ui, text: &str) -> Response {
     let galley = ui.painter().layout_no_wrap(text.into(), medium(14.0), Color32::PLACEHOLDER);
     let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(32.0, 18.0), Sense::click());
-    ui.painter().rect_filled(rect, rect.height() / 2.0, if response.hovered() { HOVER } else { SURFACE });
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, TEXT);
+    ui.painter().rect_filled(rect, rect.height() / 2.0, if response.hovered() { p().surface_hover } else { p().surface });
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, p().text);
     clickable(response)
 }
 
@@ -478,9 +478,9 @@ fn about(ui: &mut Ui, text: &str) {
     ui.scope(|ui| {
         ui.set_max_width(820.0);
         let shown = cut.map_or(text.to_string(), |at| format!("{}…", text[..at].trim_end()));
-        ui.label(RichText::new(shown).size(15.0).color(SECONDARY));
+        ui.label(RichText::new(shown).size(15.0).color(p().secondary));
     });
-    if cut.is_some() && link_text(ui, RichText::new("Read more").font(semibold(13.0)).color(TEXT)).clicked() {
+    if cut.is_some() && link_text(ui, RichText::new("Read more").font(semibold(13.0)).color(p().text)).clicked() {
         ui.data_mut(|d| d.insert_temp(id, true));
     }
 }
@@ -529,7 +529,7 @@ impl Rows<'_> {
             let width = |share: f32| free * share / total;
             ui.horizontal(|ui| {
                 cell(ui, NUMBER, 28.0, |ui| {
-                    ui.label(RichText::new("#").font(medium(11.0)).color(DIM));
+                    ui.label(RichText::new("#").font(medium(11.0)).color(p().dim));
                 });
                 for &(sort, name, share, _) in &columns {
                     cell(ui, width(share), 28.0, |ui| column_header(ui, name, sort, sorted, actions));
@@ -538,7 +538,7 @@ impl Rows<'_> {
             });
             let full = ui.available_width();
             let left = ui.cursor().left();
-            ui.painter().hline(left..=left + full, ui.cursor().top(), Stroke::new(1.0, LINE));
+            ui.painter().hline(left..=left + full, ui.cursor().top(), Stroke::new(1.0, p().outline));
             ui.add_space(6.0);
             for (pos, t) in ordered(tracks, order).enumerate() {
                 let rect = Rect::from_min_size(ui.cursor().min, vec2(full, height));
@@ -555,19 +555,19 @@ impl Rows<'_> {
                 }
                 let hovered = ui.rect_contains_pointer(rect);
                 if hovered {
-                    ui.painter().rect_filled(rect, 6.0, SURFACE);
+                    ui.painter().rect_filled(rect, 6.0, p().surface);
                 }
                 let playing = self.playing == Some(t.id);
                 ui.horizontal(|ui| {
                     cell(ui, NUMBER, height, |ui| {
                         if hovered {
-                            if icon_button(ui, Icon::Play, 14.0, TEXT).clicked() {
+                            if icon_button(ui, Icon::Play, 14.0, p().text).clicked() {
                                 actions.push(play());
                             }
                         } else if playing {
-                            ui.add(Icon::Playing.image(ACCENT, 16.0));
+                            ui.add(Icon::Playing.image(p().accent, 16.0));
                         } else {
-                            ui.label(RichText::new((pos + 1).to_string()).color(DIM));
+                            ui.label(RichText::new((pos + 1).to_string()).color(p().dim));
                         }
                     });
                     for &(sort, _, share, _) in &columns {
@@ -577,7 +577,7 @@ impl Rows<'_> {
                                     picture(ui, art(t.cover.as_deref(), 80), THUMB, false);
                                     ui.add_space(4.0);
                                 }
-                                let color = if playing { ACCENT } else { TEXT };
+                                let color = if playing { p().accent } else { p().text };
                                 let title = ui.add(egui::Label::new(RichText::new(&t.title).font(medium(14.0)).color(color)).truncate().selectable(false).sense(Sense::click()));
                                 if title.clicked() {
                                     actions.push(play());
@@ -586,12 +586,12 @@ impl Rows<'_> {
                             Sort::Artist => link_to(ui, &t.artist, t.artist_id.map(Source::Artist), actions),
                             Sort::Album => link_to(ui, &t.album, t.album_id.map(Source::Album), actions),
                             _ => {
-                                ui.label(RichText::new(t.added.as_deref().unwrap_or_default()).color(SECONDARY));
+                                ui.label(RichText::new(t.added.as_deref().unwrap_or_default()).color(p().secondary));
                             }
                         });
                     }
                     cell(ui, TIME, height, |ui| {
-                        ui.label(RichText::new(clock(f64::from(t.duration))).color(SECONDARY));
+                        ui.label(RichText::new(clock(f64::from(t.duration))).color(p().secondary));
                     });
                     heart(ui, t.id, self.library, hovered, actions);
                 });
@@ -616,7 +616,7 @@ impl Rows<'_> {
         // The gap above or below this row, and where the dragged track ends up once taken out.
         let gap = if at.y < rect.center().y { pos } else { pos + 1 };
         let y = if gap == pos { rect.top() } else { rect.bottom() };
-        ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, ACCENT));
+        ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, p().accent));
         let to = if gap > dragged.0 { gap - 1 } else { gap };
         if ui.input(|i| i.pointer.any_released()) && to != dragged.0 {
             actions.push(Action::MoveInPlaylist(playlist.into(), dragged.0, to));
@@ -630,8 +630,8 @@ impl Rows<'_> {
         ui.horizontal(|ui| {
             picture(ui, art(t.cover.as_deref(), 80), 40.0, false);
             ui.vertical(|ui| {
-                ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(14.0)).color(TEXT)).truncate());
-                ui.add(egui::Label::new(RichText::new(&t.artist).size(13.0).color(SECONDARY)).truncate());
+                ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(14.0)).color(p().text)).truncate());
+                ui.add(egui::Label::new(RichText::new(&t.artist).size(13.0).color(p().secondary)).truncate());
             });
         });
         ui.separator();
@@ -673,7 +673,7 @@ impl Rows<'_> {
     fn add_to_playlist(&self, ui: &mut Ui, track: u64, actions: &mut Vec<Action>) {
         ui.set_min_width(240.0);
         let filter_id = egui::Id::new("playlist filter");
-        if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
+        if ui.add(egui::Button::image_and_text(Icon::Plus.image(p().text, 16.0), "Create new playlist")).clicked() {
             actions.push(dialogs::form(Target::Create(Some(track)), ""));
             ui.close();
         }
@@ -681,7 +681,7 @@ impl Rows<'_> {
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
         search_field(ui, &mut filter, "Find a playlist", 216.0, filter_id.with("field"));
         let needle = filter.to_lowercase();
-        ui.label(RichText::new(if needle.is_empty() { "RECENT" } else { "MATCHING" }).font(semibold(11.0)).color(DIM));
+        ui.label(RichText::new(if needle.is_empty() { "RECENT" } else { "MATCHING" }).font(semibold(11.0)).color(p().dim));
         let shown = if needle.is_empty() { 10 } else { usize::MAX };
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
             for p in self.library.playlists.iter().filter(|p| p.title.to_lowercase().contains(&needle)).take(shown) {
@@ -693,7 +693,7 @@ impl Rows<'_> {
 }
 
 fn link_to(ui: &mut Ui, text: &str, to: Option<Source>, actions: &mut Vec<Action>) {
-    if link_text(ui, RichText::new(text).color(SECONDARY)).clicked()
+    if link_text(ui, RichText::new(text).color(p().secondary)).clicked()
         && let Some(source) = to
     {
         actions.push(Action::Open(source));
@@ -704,12 +704,12 @@ fn link_to(ui: &mut Ui, text: &str, to: Option<Source>, actions: &mut Vec<Action
 fn column_header(ui: &mut Ui, name: &str, sort: Sort, sorted: Option<(Sort, bool)>, actions: &mut Vec<Action>) {
     let text = RichText::new(name).font(medium(11.0));
     let Some((current, reverse)) = sorted else {
-        ui.label(text.color(DIM));
+        ui.label(text.color(p().dim));
         return;
     };
     let active = current == sort;
     let header = ui.horizontal(|ui| {
-        ui.label(text.color(if active { TEXT } else { DIM }));
+        ui.label(text.color(if active { p().text } else { p().dim }));
         if active {
             let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
             arrow(ui, rect.center(), reverse);

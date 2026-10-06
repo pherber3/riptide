@@ -4,8 +4,10 @@ use std::path::Path;
 use egui::{RichText, Ui};
 use serde::{Deserialize, Serialize};
 
+use fastframe_theme::Catalog;
+
 use crate::app::Action;
-use crate::theme::{SECONDARY, SURFACE, TEXT, medium};
+use crate::theme::{Palette, p, medium};
 use crate::tidal::Quality;
 use crate::view::Sort;
 use crate::widgets::{section, switch, tier_color};
@@ -22,6 +24,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// The output device by name, or the system default.
     pub device: Option<String>,
+    /// The theme: a palette file's name in `data/themes`, or Riptide's own look.
+    pub theme: Option<String>,
     /// The window's outer position and inner size (x, y, width, height), while not maximized.
     pub window: Option<[f32; 4]>,
     pub maximized: bool,
@@ -31,7 +35,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, window: None, maximized: false, sorts: HashMap::new() }
+        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, theme: None, window: None, maximized: false, sorts: HashMap::new() }
     }
 }
 
@@ -49,8 +53,22 @@ impl Settings {
 
 /// The settings page: one card per section, a row per setting with its control on the right. It
 /// edits `s` directly; quality goes through an action, since it reloads the playing track.
-pub fn page(ui: &mut Ui, s: &mut Settings, lastfm_user: Option<&str>, home: &Path, actions: &mut Vec<Action>) {
+pub fn page(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, home: &Path, actions: &mut Vec<Action>) {
     ui.set_max_width(760.0);
+    card(ui, "Appearance", |ui| {
+        row(ui, "Theme", "Themes are palette files: copy one in the themes folder and change its colours to make your own", |ui| {
+            if ui.button("Open folder").clicked() {
+                let _ = open::that(home.join("data").join("themes"));
+            }
+            let shown = s.theme.as_deref().map_or("Riptide", fastframe_theme::display_name);
+            egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(shown).show_ui(ui, |ui| {
+                ui.selectable_value(&mut s.theme, None, "Riptide");
+                for theme in themes.picker_themes() {
+                    ui.selectable_value(&mut s.theme, Some(theme.filename.clone()), fastframe_theme::display_name(&theme.filename));
+                }
+            });
+        });
+    });
     card(ui, "Playback", |ui| {
         let detail = match s.quality {
             Quality::Max => "Up to 24-bit, 192 kHz FLAC",
@@ -112,7 +130,7 @@ pub fn page(ui: &mut Ui, s: &mut Settings, lastfm_user: Option<&str>, home: &Pat
 
 fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     section(ui, title);
-    egui::Frame::new().fill(SURFACE).corner_radius(10).inner_margin(egui::Margin::symmetric(20, 14)).show(ui, |ui| {
+    egui::Frame::new().fill(p().surface).corner_radius(10).inner_margin(egui::Margin::symmetric(20, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui);
     });
@@ -124,8 +142,8 @@ fn row(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
         ui,
         |ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).font(medium(15.0)).color(TEXT));
-                ui.label(RichText::new(detail).size(13.0).color(SECONDARY));
+                ui.label(RichText::new(title).font(medium(15.0)).color(p().text));
+                ui.label(RichText::new(detail).size(13.0).color(p().secondary));
             });
         },
         control,

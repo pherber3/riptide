@@ -5,7 +5,7 @@ use egui::{Align, Color32, Key, Layout, RichText, Sense, Ui, Vec2, vec2};
 use super::{Action, App, Body, SEARCH_PAUSE, Source, then};
 use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
-use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
+use crate::theme::{p, Icon, bold, semibold};
 use crate::tidal::{self, Card, Item, Quality};
 use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
 
@@ -15,16 +15,16 @@ struct Dragged(String, String);
 impl App {
     pub(super) fn login_ui(&mut self, ui: &mut Ui) {
         let mut finish = None;
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p().window)).show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
-                ui.label(RichText::new("riptide").font(bold(44.0)).color(TEXT));
-                ui.label(RichText::new("Your Tidal library, light and fast").size(15.0).color(SECONDARY));
+                ui.label(RichText::new("riptide").font(bold(44.0)).color(p().text));
+                ui.label(RichText::new("Your Tidal library, light and fast").size(15.0).color(p().secondary));
                 ui.add_space(32.0);
                 if self.busy {
                     ui.spinner();
                 } else if let Some((flow, pasted)) = &mut self.login {
-                    ui.label(RichText::new("Sign in in your browser, then paste the address of the page you land on:").color(SECONDARY));
+                    ui.label(RichText::new("Sign in in your browser, then paste the address of the page you land on:").color(p().secondary));
                     ui.add_space(8.0);
                     ui.add(egui::TextEdit::singleline(pasted).desired_width(520.0).margin(vec2(12.0, 8.0)));
                     ui.hyperlink_to("Open the sign-in page again", &flow.url);
@@ -37,7 +37,7 @@ impl App {
                 }
                 if let Some((e, true)) = &self.message {
                     ui.add_space(12.0);
-                    ui.colored_label(DANGER, e);
+                    ui.colored_label(p().danger, e);
                 }
             });
         });
@@ -53,20 +53,20 @@ impl App {
 
     pub(super) fn sidebar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let open = self.page.as_ref().map(|p| &p.source);
-        let frame = egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin { left: 12, right: 12, top: 20, bottom: 8 });
+        let frame = egui::Frame::new().fill(p().panel).inner_margin(egui::Margin { left: 12, right: 12, top: 20, bottom: 8 });
         egui::Panel::left("nav").exact_size(232.0).frame(frame).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let heading = |ui: &mut Ui, text: &str| {
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new(text).font(semibold(11.0)).color(DIM));
+                    ui.label(RichText::new(text).font(semibold(11.0)).color(p().dim));
                 });
                 ui.add_space(4.0);
             };
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
-                ui.label(RichText::new("riptide").font(bold(20.0)).color(TEXT));
+                ui.label(RichText::new("riptide").font(bold(20.0)).color(p().text));
             });
             ui.add_space(16.0);
             let top = [
@@ -90,10 +90,10 @@ impl App {
                 ui,
                 |ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new("PLAYLISTS").font(semibold(11.0)).color(DIM));
+                    ui.label(RichText::new("PLAYLISTS").font(semibold(11.0)).color(p().dim));
                 },
                 |ui| {
-                    let plus = egui::Button::image(Icon::Plus.image(SECONDARY, 16.0)).frame(false);
+                    let plus = egui::Button::image(Icon::Plus.image(p().secondary, 16.0)).frame(false);
                     egui::containers::menu::MenuButton::from_button(plus).ui(ui, |ui| {
                         menu_item(ui, actions, "New playlist", dialogs::form(Target::Create(None), ""));
                         menu_item(ui, actions, "New folder", dialogs::form(Target::CreateFolder, ""));
@@ -112,7 +112,7 @@ impl App {
                         // A playlist dragged onto a folder moves into it.
                         Card::Folder { id, .. } => {
                             if response.dnd_hover_payload::<Dragged>().is_some() {
-                                ui.painter().rect_stroke(response.rect, 8.0, egui::Stroke::new(1.5, ACCENT), egui::StrokeKind::Inside);
+                                ui.painter().rect_stroke(response.rect, 8.0, egui::Stroke::new(1.5, p().accent), egui::StrokeKind::Inside);
                             }
                             if let Some(dragged) = response.dnd_release_payload::<Dragged>() {
                                 actions.push(Action::MovePlaylist(dragged.0.clone(), id.clone()));
@@ -120,7 +120,7 @@ impl App {
                             response.context_menu(|ui| {
                                 menu_item(ui, actions, "Rename", dialogs::form(Target::RenameFolder(id.clone()), text.as_str()));
                                 let delete = dialogs::confirm(format!("Delete {text}?"), "The folder goes; the playlists in it move to the top level.", Action::DeleteFolder(id.clone()));
-                                menu_item(ui, actions, RichText::new("Delete folder").color(DANGER), delete);
+                                menu_item(ui, actions, RichText::new("Delete folder").color(p().danger), delete);
                             });
                         }
                         Card::Playlist(p) => {
@@ -146,19 +146,19 @@ impl App {
     pub(super) fn drag_label(&self, ctx: &egui::Context) {
         let (Some(dragged), Some(at)) = (egui::DragAndDrop::payload::<Dragged>(ctx), ctx.pointer_interact_pos()) else { return };
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dragged playlist")));
-        let galley = painter.layout_no_wrap(dragged.1.clone(), semibold(13.0), TEXT);
+        let galley = painter.layout_no_wrap(dragged.1.clone(), semibold(13.0), p().text);
         let rect = egui::Rect::from_min_size(at + vec2(14.0, 6.0), galley.size() + vec2(20.0, 12.0));
-        painter.rect_filled(rect, 8.0, theme::HOVER);
-        painter.galley(rect.min + vec2(10.0, 6.0), galley, TEXT);
+        painter.rect_filled(rect, 8.0, p().surface_hover);
+        painter.galley(rect.min + vec2(10.0, 6.0), galley, p().text);
     }
 
     pub(super) fn player_bar(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
         let status = self.player.status.clone();
         let mut save = false;
-        let frame = egui::Frame::new().fill(mood.map_or(BAR, |c| c.lerp_to_gamma(Color32::BLACK, 0.25))).inner_margin(egui::Margin::symmetric(16, 0));
+        let frame = egui::Frame::new().fill(mood.map_or(p().panel, |c| c.lerp_to_gamma(Color32::BLACK, 0.25))).inner_margin(egui::Margin::symmetric(16, 0));
         egui::Panel::bottom("player").exact_size(84.0).frame(frame).show(ui, |ui| {
             let edge = ui.clip_rect();
-            ui.painter().hline(edge.x_range(), edge.top(), egui::Stroke::new(1.0, LINE));
+            ui.painter().hline(edge.x_range(), edge.top(), egui::Stroke::new(1.0, p().outline));
             ui.columns(3, |cols| {
                 let track = self.queue.current();
                 cols[0].horizontal_centered(|ui| {
@@ -173,8 +173,8 @@ impl App {
                         ui.set_max_width(ui.available_width() - 40.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.add_space(23.0);
-                        album |= link_text(ui, RichText::new(&t.title).font(semibold(14.0)).color(TEXT)).clicked();
-                        if link_text(ui, RichText::new(&t.artist).size(13.0).color(SECONDARY)).clicked()
+                        album |= link_text(ui, RichText::new(&t.title).font(semibold(14.0)).color(p().text)).clicked();
+                        if link_text(ui, RichText::new(&t.artist).size(13.0).color(p().secondary)).clicked()
                             && let Some(id) = t.artist_id
                         {
                             actions.push(Action::Open(Source::Artist(id)));
@@ -190,14 +190,14 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 14.0;
                         ui.add_space((ui.available_width() - 200.0) / 2.0);
-                        let on = |on: bool| if on { ACCENT } else { SECONDARY };
+                        let on = |on: bool| if on { p().accent } else { p().secondary };
                         let toggle = if status.playing.load(Relaxed) { Icon::Pause } else { Icon::Play };
                         let repeat = if self.queue.repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat };
                         let buttons = [
                             (Icon::Shuffle, 16.0, on(self.queue.shuffled()), Action::Shuffle),
-                            (Icon::Prev, 18.0, TEXT, Action::Prev),
-                            (toggle, 18.0, TEXT, Action::Toggle),
-                            (Icon::Next, 18.0, TEXT, Action::Next),
+                            (Icon::Prev, 18.0, p().text, Action::Prev),
+                            (toggle, 18.0, p().text, Action::Toggle),
+                            (Icon::Next, 18.0, p().text, Action::Next),
                             (repeat, 16.0, on(self.queue.repeat != Repeat::Off), Action::Repeat),
                         ];
                         for (icon, size, color, action) in buttons {
@@ -216,7 +216,7 @@ impl App {
                     let total = track.map_or(0.0, |t| f64::from(t.duration));
                     let mut position = self.dragging.or(self.restored).unwrap_or_else(|| status.position()).min(total);
                     ui.horizontal(|ui| {
-                        let time = |text: String| RichText::new(text).size(11.0).color(SECONDARY);
+                        let time = |text: String| RichText::new(text).size(11.0).color(p().secondary);
                         ui.label(time(clock(position)));
                         let seek = bar(ui, &mut position, total, ui.available_width() - 40.0, track.is_some());
                         if seek.dragged() {
@@ -237,10 +237,10 @@ impl App {
                         status.set_volume(self.settings.volume * self.settings.volume);
                     }
                     save = slider.drag_stopped() || slider.clicked();
-                    ui.add(if self.settings.volume > 0.0 { Icon::Volume } else { Icon::Muted }.image(SECONDARY, 18.0));
+                    ui.add(if self.settings.volume > 0.0 { Icon::Volume } else { Icon::Muted }.image(p().secondary, 18.0));
                     ui.add_space(6.0);
                     for (open, icon, hint, action) in [(self.queue_open, Icon::Queue, "Queue", Action::Queue), (self.lyrics_open, Icon::Lyrics, "Lyrics", Action::Lyrics)] {
-                        if icon_button(ui, icon, 18.0, if open { ACCENT } else { SECONDARY }).on_hover_text(hint).clicked() {
+                        if icon_button(ui, icon, 18.0, if open { p().accent } else { p().secondary }).on_hover_text(hint).clicked() {
                             actions.push(action);
                         }
                     }
@@ -256,7 +256,7 @@ impl App {
                             }
                         }
                     });
-                    ui.label(RichText::new(format).size(11.0).color(mood.map_or(DIM, |_| Color32::from_white_alpha(150))));
+                    ui.label(RichText::new(format).size(11.0).color(mood.map_or(p().dim, |_| Color32::from_white_alpha(150))));
                 });
             });
         });
@@ -271,12 +271,12 @@ impl App {
             return;
         }
         let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, editing: None, queue: true };
-        let frame = egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(20, 0));
+        let frame = egui::Frame::new().fill(p().panel).inner_margin(egui::Margin::symmetric(20, 0));
         egui::Panel::right("side").default_size(420.0).resizable(true).frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 section(ui, "Queue");
                 if self.queue.tracks.is_empty() {
-                    ui.label(RichText::new("Nothing queued. Right-click a track to add it.").color(SECONDARY));
+                    ui.label(RichText::new("Nothing queued. Right-click a track to add it.").color(p().secondary));
                 }
                 rows.show(ui, &self.queue.tracks, None, false, None, actions);
             });
@@ -286,7 +286,7 @@ impl App {
     /// The playing track's artwork and lyrics over the whole window, in the artwork's colour.
     pub(super) fn now_playing(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
         let (soft, faint) = (Color32::from_white_alpha(180), Color32::from_white_alpha(110));
-        let frame = egui::Frame::new().fill(mood.unwrap_or(BAR)).inner_margin(egui::Margin { left: 56, right: 40, top: 16, bottom: 0 });
+        let frame = egui::Frame::new().fill(mood.unwrap_or(p().panel)).inner_margin(egui::Margin { left: 56, right: 40, top: 16, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if icon_button(ui, Icon::Down, 24.0, soft).on_hover_text("Close (Esc)").clicked() {
@@ -299,10 +299,12 @@ impl App {
             };
             let height = ui.available_height();
             let side = (ui.available_width() * 0.42).min(height - 100.0).max(120.0);
+            // The cover and its title sit centred; the lyrics start level with the cover's top.
+            let top = ((height - side - 70.0) / 2.0).max(0.0);
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(side);
-                    ui.add_space(((height - side - 70.0) / 2.0).max(0.0));
+                    ui.add_space(top);
                     picture(ui, art(t.cover.as_deref(), 640), side, false);
                     ui.add_space(16.0);
                     ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(20.0)).color(Color32::WHITE)).truncate());
@@ -313,7 +315,7 @@ impl App {
                 let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
                 ui.vertical(|ui| {
                     scroll.show(ui, |ui| {
-                        ui.add_space(height * 0.2);
+                        ui.add_space(top);
                         let line = |text: &str, color| RichText::new(text).font(bold(34.0)).color(color);
                         match lyrics {
                             None => {
@@ -351,7 +353,7 @@ impl App {
     }
 
     pub(super) fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 16, top: 14, bottom: 0 });
+        let frame = egui::Frame::new().fill(p().window).inner_margin(egui::Margin { left: 28, right: 16, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The page's artwork colour, glowing down from the top.
             let cover = self.page.as_ref().and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());
@@ -362,7 +364,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 for (icon, enabled, back) in [(Icon::Back, !self.back.is_empty(), true), (Icon::Forward, !self.forward.is_empty(), false)] {
-                    if ui.add_enabled_ui(enabled, |ui| icon_button(ui, icon, 20.0, SECONDARY)).inner.clicked() {
+                    if ui.add_enabled_ui(enabled, |ui| icon_button(ui, icon, 20.0, p().secondary)).inner.clicked() {
                         actions.push(Action::Step(back));
                     }
                 }
@@ -375,7 +377,7 @@ impl App {
                     self.search_due = Some(0.0);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, Icon::Settings, 20.0, SECONDARY).on_hover_text("Settings").clicked() {
+                    if icon_button(ui, Icon::Settings, 20.0, p().secondary).on_hover_text("Settings").clicked() {
                         actions.push(Action::Open(Source::Settings));
                     }
                     ui.add_space(8.0);
@@ -383,7 +385,7 @@ impl App {
                         ui.spinner();
                     }
                     if let Some((text, error)) = &self.message {
-                        ui.add(egui::Label::new(RichText::new(text).color(if *error { DANGER } else { SECONDARY })).truncate());
+                        ui.add(egui::Label::new(RichText::new(text).color(if *error { p().danger } else { p().secondary })).truncate());
                     }
                 });
             });
@@ -399,7 +401,7 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 crate::widgets::page(ui, page, &rows, actions);
                 if matches!(page.body, Body::Settings) {
-                    crate::settings::page(ui, settings, lastfm_user.as_deref(), home, actions);
+                    crate::settings::page(ui, settings, &self.themes, lastfm_user.as_deref(), home, actions);
                 }
             });
         });

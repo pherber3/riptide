@@ -27,6 +27,7 @@ memmap2 = "0.9"
 fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }

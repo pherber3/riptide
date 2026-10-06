@@ -1,3 +1,5 @@
+use std::sync::RwLock;
+
 use egui::epaint::Shadow;
 use egui::{Color32, CornerRadius, FontId, Stroke, TextStyle, vec2};
 use fastframe_fonts::Weight;
@@ -6,18 +8,117 @@ const fn rgb(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
-pub const BG: Color32 = rgb(0x0b0b0d);
-pub const SIDEBAR: Color32 = rgb(0x111114);
-pub const BAR: Color32 = rgb(0x151518);
-pub const SURFACE: Color32 = rgb(0x1e1e22);
-pub const HOVER: Color32 = rgb(0x2a2a30);
-pub const LINE: Color32 = rgb(0x242429);
-pub const TEXT: Color32 = rgb(0xf5f5f7);
-pub const SECONDARY: Color32 = rgb(0xa1a1a6);
-pub const DIM: Color32 = rgb(0x6b6b70);
-pub const ACCENT: Color32 = rgb(0x33ffee);
+/// The quality tiers' colours, as Tidal has them: the same in every theme.
 pub const GOLD: Color32 = rgb(0xf5c542);
-pub const DANGER: Color32 = rgb(0xff6b6b);
+pub const TEAL: Color32 = rgb(0x33ffee);
+
+/// The interface colours, by the names palette files use (see `fastframe_theme::BASE_COLORS`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub dark: bool,
+    /// The page behind everything.
+    pub window: Color32,
+    /// The sidebar, side panels and player bar.
+    pub panel: Color32,
+    /// Fields, cards and highlighted rows.
+    pub surface: Color32,
+    pub surface_hover: Color32,
+    pub surface_active: Color32,
+    /// Hairlines between things.
+    pub outline: Color32,
+    pub text: Color32,
+    pub secondary: Color32,
+    pub dim: Color32,
+    pub accent: Color32,
+    pub accent_hover: Color32,
+    pub on_accent: Color32,
+    pub danger: Color32,
+    pub warning: Color32,
+    /// Menus and popups.
+    pub overlay: Color32,
+    pub shadow: Color32,
+}
+
+/// Riptide's own look: near-black, with Tidal's teal.
+pub const DARK: Palette = Palette {
+    dark: true,
+    window: rgb(0x0b0b0d),
+    panel: rgb(0x121215),
+    surface: rgb(0x1e1e22),
+    surface_hover: rgb(0x2a2a30),
+    surface_active: rgb(0x34343b),
+    outline: rgb(0x242429),
+    text: rgb(0xf5f5f7),
+    secondary: rgb(0xa1a1a6),
+    dim: rgb(0x6b6b70),
+    accent: TEAL,
+    accent_hover: rgb(0x80fff5),
+    on_accent: rgb(0x000000),
+    danger: rgb(0xff6b6b),
+    warning: GOLD,
+    overlay: rgb(0x1e1e22),
+    shadow: Color32::from_black_alpha(160),
+};
+
+const LIGHT: Palette = Palette {
+    dark: false,
+    window: rgb(0xffffff),
+    panel: rgb(0xf5f5f7),
+    surface: rgb(0xececf0),
+    surface_hover: rgb(0xe2e2e7),
+    surface_active: rgb(0xd6d6dc),
+    outline: rgb(0xe0e0e5),
+    text: rgb(0x1d1d1f),
+    secondary: rgb(0x6e6e73),
+    dim: rgb(0xa1a1a6),
+    accent: rgb(0x0e9f94),
+    accent_hover: rgb(0x0b857c),
+    on_accent: rgb(0xffffff),
+    danger: rgb(0xd63b4c),
+    warning: rgb(0xb8860b),
+    overlay: rgb(0xffffff),
+    shadow: Color32::from_black_alpha(50),
+};
+
+impl fastframe_theme::Palette for Palette {
+    fn base(base: fastframe_theme::Base) -> Self {
+        match base {
+            fastframe_theme::Base::Dark => DARK,
+            fastframe_theme::Base::Light => LIGHT,
+        }
+    }
+
+    fn set(&mut self, name: &str, color: Color32) -> bool {
+        let slot = match name {
+            "window" => &mut self.window,
+            "panel" => &mut self.panel,
+            "surface" => &mut self.surface,
+            "surface_hover" => &mut self.surface_hover,
+            "surface_active" => &mut self.surface_active,
+            "outline" => &mut self.outline,
+            "text" => &mut self.text,
+            "secondary" => &mut self.secondary,
+            "dim" => &mut self.dim,
+            "accent" => &mut self.accent,
+            "accent_hover" => &mut self.accent_hover,
+            "on_accent" => &mut self.on_accent,
+            "danger" => &mut self.danger,
+            "warning" => &mut self.warning,
+            "overlay" => &mut self.overlay,
+            "shadow" => &mut self.shadow,
+            _ => return false,
+        };
+        *slot = color;
+        true
+    }
+}
+
+static PALETTE: RwLock<Palette> = RwLock::new(DARK);
+
+/// The palette in use.
+pub fn p() -> Palette {
+    *PALETTE.read().unwrap()
+}
 
 pub fn medium(size: f32) -> FontId {
     Weight::Medium.font_id(size)
@@ -76,30 +177,38 @@ pub fn logo(size: usize) -> Vec<u8> {
     image.resize_exact(size as u32, size as u32, image::imageops::FilterType::Lanczos3).to_rgba8().into_raw()
 }
 
-/// The one dark look: near-black panels, borderless rounded widgets, Inter at real weights.
-pub fn install(ctx: &egui::Context) {
+pub fn install(ctx: &egui::Context, palette: Palette) {
     egui_extras::install_image_loaders(ctx);
     fastframe_icons::install::<Icon>(ctx);
-    ctx.set_theme(egui::ThemePreference::Dark);
-    ctx.style_mut_of(egui::Theme::Dark, |s| {
+    apply(ctx, palette);
+}
+
+/// Uses `c` for everything: the app's own drawing reads it through `p()`, and egui's widgets get
+/// borderless rounded looks in its colours, with Inter at real weights.
+pub fn apply(ctx: &egui::Context, c: Palette) {
+    *PALETTE.write().unwrap() = c;
+    let theme = if c.dark { egui::Theme::Dark } else { egui::Theme::Light };
+    ctx.set_theme(theme);
+    ctx.style_mut_of(theme, |s| {
         let v = &mut s.visuals;
-        v.panel_fill = BG;
-        v.window_fill = SURFACE;
-        v.extreme_bg_color = SURFACE;
-        v.faint_bg_color = SURFACE;
-        v.weak_text_color = Some(SECONDARY);
-        v.hyperlink_color = SECONDARY;
-        v.selection.bg_fill = ACCENT.gamma_multiply(0.3);
-        v.selection.stroke = Stroke::new(1.0, ACCENT);
-        v.text_cursor.stroke = Stroke::new(2.0, ACCENT);
-        v.window_stroke = Stroke::new(1.0, LINE);
+        *v = if c.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+        v.panel_fill = c.window;
+        v.window_fill = c.overlay;
+        v.extreme_bg_color = c.surface;
+        v.faint_bg_color = c.surface;
+        v.weak_text_color = Some(c.secondary);
+        v.hyperlink_color = c.secondary;
+        v.selection.bg_fill = c.accent.gamma_multiply(0.3);
+        v.selection.stroke = Stroke::new(1.0, c.accent);
+        v.text_cursor.stroke = Stroke::new(2.0, c.accent);
+        v.window_stroke = Stroke::new(1.0, c.outline);
         v.window_corner_radius = CornerRadius::same(10);
         v.menu_corner_radius = CornerRadius::same(8);
-        v.window_shadow = Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(160) };
-        v.popup_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(160) };
+        v.window_shadow = Shadow { offset: [0, 8], blur: 28, spread: 0, color: c.shadow };
+        v.popup_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: c.shadow };
         v.striped = false;
         let w = &mut v.widgets;
-        for (state, fill, text) in [(&mut w.noninteractive, BG, TEXT), (&mut w.inactive, SURFACE, SECONDARY), (&mut w.hovered, HOVER, TEXT), (&mut w.active, HOVER, TEXT), (&mut w.open, HOVER, TEXT)] {
+        for (state, fill, text) in [(&mut w.noninteractive, c.window, c.text), (&mut w.inactive, c.surface, c.secondary), (&mut w.hovered, c.surface_hover, c.text), (&mut w.active, c.surface_active, c.text), (&mut w.open, c.surface_hover, c.text)] {
             state.corner_radius = CornerRadius::same(6);
             state.bg_fill = fill;
             state.weak_bg_fill = fill;
@@ -107,7 +216,7 @@ pub fn install(ctx: &egui::Context) {
             state.fg_stroke = Stroke::new(1.5, text);
             state.expansion = 0.0;
         }
-        w.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+        w.noninteractive.bg_stroke = Stroke::new(1.0, c.outline);
         s.spacing.item_spacing = vec2(8.0, 6.0);
         s.spacing.button_padding = vec2(12.0, 7.0);
         s.spacing.interact_size.y = 28.0;
