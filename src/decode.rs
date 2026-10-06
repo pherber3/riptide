@@ -25,6 +25,8 @@ pub struct Decoder {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track: u32,
     download: crate::cache::Download,
+    /// Reused for every packet's interleaved samples.
+    samples: Option<SampleBuffer<f32>>,
     pub info: Info,
 }
 
@@ -45,7 +47,7 @@ impl Decoder {
         };
         let decoder = symphonia::default::get_codecs().make(p, &DecoderOptions::default())?;
         let track = track.id;
-        Ok(Self { format, decoder, track, download, info })
+        Ok(Self { format, decoder, track, download, samples: None, info })
     }
 
     /// Seeking needs the stream's full length, which is known once the download is done.
@@ -60,12 +62,12 @@ impl Decoder {
         Ok(())
     }
 
-    /// Decodes the next packet into `out` as interleaved samples; false at the end.
-    pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+    /// The next packet's samples, interleaved; None at the end.
+    pub fn next(&mut self) -> Result<Option<&[f32]>> {
         loop {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
-                Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+                Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e.into()),
             };
             if packet.track_id() != self.track {
@@ -73,11 +75,14 @@ impl Decoder {
             }
             match self.decoder.decode(&packet) {
                 Ok(audio) => {
-                    let mut buf = SampleBuffer::<f32>::new(audio.capacity() as u64, *audio.spec());
+                    let (capacity, spec) = (audio.capacity() as u64, *audio.spec());
+                    let needed = capacity as usize * spec.channels.count();
+                    if self.samples.as_ref().is_none_or(|buf| buf.capacity() < needed) {
+                        self.samples = Some(SampleBuffer::new(capacity, spec));
+                    }
+                    let buf = self.samples.as_mut().expect("just made");
                     buf.copy_interleaved_ref(audio);
-                    out.clear();
-                    out.extend_from_slice(buf.samples());
-                    return Ok(true);
+                    return Ok(Some(buf.samples()));
                 }
                 Err(Error::DecodeError(_)) => continue,
                 Err(e) => return Err(e.into()),
@@ -92,15 +97,18 @@ pub fn map_channels(input: &[f32], from: usize, to: usize, out: &mut Vec<f32>) {
     }
 }
 
+/// Converts interleaved samples to the device's rate, reusing its buffers (none when the rates match).
 pub struct Resampler {
     inner: Option<FftFixedIn<f32>>,
     pending: Vec<Vec<f32>>,
+    output: Vec<Vec<f32>>,
 }
 
 impl Resampler {
     pub fn new(from: u32, to: u32, channels: usize) -> Result<Self> {
         let inner = (from != to).then(|| FftFixedIn::new(from as usize, to as usize, 1024, 2, channels)).transpose()?;
-        Ok(Self { inner, pending: vec![Vec::new(); channels] })
+        let output = inner.as_ref().map_or_else(Vec::new, |r| r.output_buffer_allocate(true));
+        Ok(Self { inner, pending: vec![Vec::new(); channels], output })
     }
 
     pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<()> {
@@ -116,23 +124,27 @@ impl Resampler {
         }
         while self.pending[0].len() >= r.input_frames_next() {
             let n = r.input_frames_next();
-            let chunk: Vec<Vec<f32>> = self.pending.iter_mut().map(|p| p.drain(..n).collect()).collect();
-            interleave(&r.process(&chunk, None)?, out);
+            let chunk: Vec<&[f32]> = self.pending.iter().map(|p| &p[..n]).collect();
+            let (_, frames) = r.process_into_buffer(&chunk, &mut self.output, None)?;
+            interleave(&self.output, frames, out);
+            self.pending.iter_mut().for_each(|p| drop(p.drain(..n)));
         }
         Ok(())
     }
 
     pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<()> {
         if let Some(r) = &mut self.inner {
-            let chunk: Vec<Vec<f32>> = self.pending.iter_mut().map(std::mem::take).collect();
-            interleave(&r.process_partial(Some(&chunk), None)?, out);
+            let chunk: Vec<&[f32]> = self.pending.iter().map(Vec::as_slice).collect();
+            let (_, frames) = r.process_partial_into_buffer(Some(&chunk), &mut self.output, None)?;
+            interleave(&self.output, frames, out);
+            self.pending.iter_mut().for_each(Vec::clear);
         }
         Ok(())
     }
 }
 
-fn interleave(channels: &[Vec<f32>], out: &mut Vec<f32>) {
-    for i in 0..channels[0].len() {
+fn interleave(channels: &[Vec<f32>], frames: usize, out: &mut Vec<f32>) {
+    for i in 0..frames {
         out.extend(channels.iter().map(|c| c[i]));
     }
 }

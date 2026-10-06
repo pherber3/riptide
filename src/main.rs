@@ -20,6 +20,7 @@ use player::{Cmd, Event, Player};
 use tidal::{Quality, Tidal};
 
 pub const CACHE_BYTES: u64 = 2 << 30;
+pub const ART_BYTES: u64 = 256 << 20;
 
 fn main() -> Result<()> {
     let dir = std::env::current_exe()?.parent().expect("exe has a directory").to_path_buf();

@@ -59,20 +59,20 @@ impl ImageLoader for Art {
         let path = self.dir.join(name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "_"));
         let (http, entries, ctx, uri) = (&*crate::tidal::HTTP, self.entries.clone(), ctx.clone(), uri.to_string());
         self.rt.spawn(async move {
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => Some(bytes),
-                Err(_) => match async { http.get(&uri).send().await?.error_for_status()?.bytes().await }.await {
-                    Ok(bytes) => {
-                        let _ = std::fs::write(&path, &bytes);
-                        Some(bytes.to_vec())
-                    }
-                    Err(_) => None,
-                },
-            };
-            let image = match bytes {
-                Some(bytes) => tokio::task::spawn_blocking(move || decode(&bytes)).await.ok().flatten(),
-                None => None,
-            };
+            // File work and decoding run on the blocking pool, off the async workers.
+            let cached = path.clone();
+            let mut image = tokio::task::spawn_blocking(move || decode(&std::fs::read(cached).ok()?)).await.ok().flatten();
+            if image.is_none()
+                && let Ok(bytes) = async { http.get(&uri).send().await?.error_for_status()?.bytes().await }.await
+            {
+                image = tokio::task::spawn_blocking(move || {
+                    let _ = std::fs::write(&path, &bytes);
+                    decode(&bytes)
+                })
+                .await
+                .ok()
+                .flatten();
+            }
             let entry = image.map_or(Entry::Failed, |image| Entry::Ready(Arc::new(image)));
             entries.lock().unwrap().insert(uri, entry);
             ctx.request_repaint();

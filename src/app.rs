@@ -264,7 +264,11 @@ impl App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         let cache = dir.join("cache");
         std::fs::create_dir_all(&cache)?;
-        cache::evict(&cache, crate::CACHE_BYTES)?;
+        let dirs = (cache.clone(), cache.join("art"));
+        rt.spawn_blocking(move || {
+            let _ = cache::evict(&dirs.0, crate::CACHE_BYTES);
+            let _ = cache::evict(&dirs.1, crate::ART_BYTES);
+        });
         crate::fonts::install(&ctx);
         ctx.add_image_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
         let (tx, rx) = channel();

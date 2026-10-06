@@ -98,14 +98,16 @@ impl Render for Sink {
             return out.fill(0.0);
         };
         let volume = f32::from_bits(self.status.volume.load(Relaxed));
-        let mut played = 0;
-        for s in out {
-            *s = rx.pop().map_or(0.0, |x| {
-                played += 1;
-                x * volume
-            });
+        let n = rx.slots().min(out.len());
+        if let Ok(chunk) = rx.read_chunk(n) {
+            let (a, b) = chunk.as_slices();
+            for (o, s) in out.iter_mut().zip(a.iter().chain(b)) {
+                *o = s * volume;
+            }
+            chunk.commit_all();
         }
-        self.status.played.fetch_add(played, Relaxed);
+        out[n..].fill(0.0);
+        self.status.played.fetch_add(n as u64, Relaxed);
     }
 }
 
@@ -113,7 +115,6 @@ struct Track {
     decoder: Box<Decoder>,
     resampler: Resampler,
     tx: rtrb::Producer<f32>,
-    packet: Vec<f32>,
     mapped: Vec<f32>,
     ready: Vec<f32>,
     sent: usize,
@@ -150,9 +151,13 @@ fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) ->
     };
     let mut track: Option<Track> = None;
     loop {
-        let playing = track.is_some() && status.playing.load(Relaxed);
-        let waiting = track.as_ref().is_some_and(|t| t.pending_seek.is_some());
-        let timeout = if playing || waiting { 10 } else { 1000 };
+        // Wake when about half the buffered audio has played (commands still wake at once).
+        let per_second = status.samples_per_second.load(Relaxed).max(1);
+        let timeout = match &track {
+            Some(t) if t.pending_seek.is_some() => 10,
+            Some(t) if status.playing.load(Relaxed) => ((RING - t.tx.slots()) as u64 * 500 / per_second).clamp(10, 250),
+            _ => 1000,
+        };
         match rx.recv_timeout(Duration::from_millis(timeout)) {
             Ok(Cmd::Load(decoder)) => {
                 let i = &decoder.info;
@@ -170,7 +175,6 @@ fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) ->
                     decoder,
                     resampler,
                     tx: ring(0.0),
-                    packet: empty(),
                     mapped: empty(),
                     ready: empty(),
                     sent: 0,
@@ -230,24 +234,29 @@ fn run(rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) ->
 /// Decodes until the ring is full or the track ends.
 fn fill(t: &mut Track, channels: usize) -> Result<()> {
     loop {
-        while t.sent < t.ready.len() {
-            if t.tx.push(t.ready[t.sent]).is_err() {
-                return Ok(());
-            }
-            t.sent += 1;
+        let n = t.tx.slots().min(t.ready.len() - t.sent);
+        if n > 0 {
+            let chunk = t.tx.write_chunk_uninit(n).expect("free slots were counted");
+            chunk.fill_from_iter(t.ready[t.sent..].iter().copied());
+            t.sent += n;
         }
-        if t.ended {
+        if t.sent < t.ready.len() || t.ended {
             return Ok(());
         }
         t.sent = 0;
         t.ready.clear();
-        t.mapped.clear();
-        if t.decoder.next(&mut t.packet)? {
-            map_channels(&t.packet, t.decoder.info.channels, channels, &mut t.mapped);
-            t.resampler.push(&t.mapped, &mut t.ready)?;
-        } else {
-            t.resampler.flush(&mut t.ready)?;
-            t.ended = true;
+        let from = t.decoder.info.channels;
+        match t.decoder.next()? {
+            Some(samples) if from == channels => t.resampler.push(samples, &mut t.ready)?,
+            Some(samples) => {
+                t.mapped.clear();
+                map_channels(samples, from, channels, &mut t.mapped);
+                t.resampler.push(&t.mapped, &mut t.ready)?;
+            }
+            None => {
+                t.resampler.flush(&mut t.ready)?;
+                t.ended = true;
+            }
         }
     }
 }
