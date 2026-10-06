@@ -37,12 +37,16 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => {
+            let mut viewport = egui::ViewportBuilder::default()
+                .with_title("Riptide")
+                .with_icon(icon())
+                .with_inner_size([1200.0, 800.0])
+                .with_min_inner_size([800.0, 500.0]);
+            if let Some((rect, maximized)) = app::saved_window(&session) {
+                viewport = viewport.with_position(rect.min).with_inner_size(rect.size()).with_maximized(maximized);
+            }
             let options = eframe::NativeOptions {
-                viewport: egui::ViewportBuilder::default()
-                    .with_title("Riptide")
-                    .with_icon(icon())
-                    .with_inner_size([1200.0, 800.0])
-                    .with_min_inner_size([800.0, 500.0]),
+                viewport,
                 ..Default::default()
             };
             eframe::run_native("riptide", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir)?))))

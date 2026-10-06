@@ -65,7 +65,7 @@ pub enum Parts {
     Segments { init: String, template: String, start: u32, count: u32 },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub id: u64,
     pub title: String,

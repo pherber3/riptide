@@ -1,9 +1,12 @@
 use std::collections::HashSet;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use crate::tidal::Track;
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub enum Repeat {
     #[default]
     Off,
@@ -12,7 +15,7 @@ pub enum Repeat {
 }
 
 /// What plays, in order, and where playback is in it.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Queue {
     pub tracks: Vec<Track>,
     pub index: Option<usize>,
@@ -22,6 +25,17 @@ pub struct Queue {
 }
 
 impl Queue {
+    /// The queue and the position in its current track, as the app was left.
+    pub fn load(path: &Path) -> Option<(Self, f64)> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+
+    pub fn save(&self, path: &Path, position: f64) {
+        if let Ok(json) = serde_json::to_vec(&(self, position)) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
     pub fn current(&self) -> Option<&Track> {
         self.tracks.get(self.index?)
     }

@@ -274,6 +274,12 @@ pub struct App {
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
+    /// Where the restored queue's current track was left, until it plays again.
+    restored: Option<f64>,
+    /// The window's last position and size while neither maximized nor minimized, and whether
+    /// it is maximized.
+    window: Option<egui::Rect>,
+    maximized: bool,
     /// Scrobbling, when `data/lastfm.txt` has an API account.
     lastfm: Option<LastFm>,
     /// The track being listened to and when it started (Unix seconds), to scrobble when it ends.
@@ -308,6 +314,8 @@ impl App {
         });
         let session = tidal::session_path(dir);
         let (quality, volume, sorts) = load_settings(&session);
+        let (queue, restored) = Queue::load(&queue_path(&session)).map_or((Queue::default(), None), |(q, at)| (q, Some(at)));
+        let (window, maximized) = saved_window(&session).map_or((None, false), |(rect, max)| (Some(rect), max));
         player.status.set_volume(volume * volume);
         let app = Self {
             rt,
@@ -329,7 +337,10 @@ impl App {
             loading: true,
             sorts,
             query: String::new(),
-            queue: Queue::default(),
+            queue,
+            restored,
+            window,
+            maximized,
             favorites: HashSet::new(),
             folders: Vec::new(),
             playlists: Vec::new(),
@@ -361,7 +372,10 @@ impl App {
     }
 
     fn save_settings(&self) {
-        let mut text = format!("quality={}\nvolume={}\n", self.quality.name(), self.volume);
+        let mut text = format!("quality={}\nvolume={}\nmaximized={}\n", self.quality.name(), self.volume, self.maximized);
+        if let Some(r) = self.window {
+            text += &format!("window={},{},{},{}\n", r.min.x, r.min.y, r.width(), r.height());
+        }
         for (page, (sort, reversed)) in &self.sorts {
             text += &format!("sort.{page}={sort:?}{}\n", if *reversed { " reversed" } else { "" });
         }
@@ -410,6 +424,7 @@ impl App {
 
     fn play(&mut self, index: usize) {
         let Some(tidal) = self.tidal.clone() else { return };
+        self.restored = None;
         // Reloading the same track in another quality is still the same listen.
         if self.resume_at.is_none() {
             self.scrobble();
@@ -527,9 +542,17 @@ impl App {
                     self.error = Some(format!("{e:#}"));
                 }
             }
-            Action::Toggle => self.player.send(Cmd::Toggle),
+            // A queue restored from last time starts where it was left.
+            Action::Toggle => match (self.restored, self.queue.index) {
+                (Some(at), Some(i)) => {
+                    self.resume_at = Some(at);
+                    self.play(i);
+                }
+                _ => self.player.send(Cmd::Toggle),
+            },
             Action::Next => self.next(),
             Action::Prev => self.prev(),
+            Action::Seek(seconds) if self.restored.is_some() => self.restored = Some(seconds),
             Action::Seek(seconds) => self.player.send(Cmd::Seek(seconds)),
             Action::Shuffle => self.queue.set_shuffle(!self.queue.shuffled()),
             Action::Repeat => self.queue.cycle_repeat(),
@@ -812,7 +835,7 @@ impl App {
                         }
                     });
                     let total = track.map_or(0.0, |t| f64::from(t.duration));
-                    let mut position = self.dragging.unwrap_or_else(|| status.position()).min(total);
+                    let mut position = self.dragging.or(self.restored).unwrap_or_else(|| status.position()).min(total);
                     ui.horizontal(|ui| {
                         let time = |text: String| RichText::new(text).size(11.0).color(SECONDARY);
                         ui.label(time(clock(position)));
@@ -996,6 +1019,8 @@ impl App {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_settings();
+        self.queue.save(&queue_path(&self.session), self.restored.unwrap_or_else(|| self.player.status.position()));
         if let Some(scrobble) = self.finish_listening() {
             let _ = self.rt.block_on(tokio::time::timeout(Duration::from_secs(3), scrobble));
         }
@@ -1004,6 +1029,13 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.receive();
         self.media_keys();
+        ui.input(|i| {
+            let v = i.viewport();
+            self.maximized = v.maximized.unwrap_or(false);
+            if !self.maximized && v.minimized != Some(true) && v.outer_rect.is_some() {
+                self.window = v.outer_rect.zip(v.inner_rect).map(|(outer, inner)| egui::Rect::from_min_size(outer.min, inner.size()));
+            }
+        });
         if self.tidal.is_none() {
             return self.login_ui(ui);
         }
@@ -1064,6 +1096,19 @@ fn quality_choices(ui: &mut Ui, current: Quality, actions: &mut Vec<Action>) {
             ui.close();
         }
     }
+}
+
+fn queue_path(session: &Path) -> PathBuf {
+    session.with_file_name("queue.json")
+}
+
+/// The window as it was left: outer position and inner size, and whether it was maximized.
+pub fn saved_window(session: &Path) -> Option<(egui::Rect, bool)> {
+    let text = std::fs::read_to_string(settings_path(session)).ok()?;
+    let value = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('='));
+    let n: Vec<f32> = value("window")?.split(',').filter_map(|n| n.parse().ok()).collect();
+    let [x, y, w, h] = n[..] else { return None };
+    Some((egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)), value("maximized") == Some("true")))
 }
 
 fn settings_path(session: &Path) -> PathBuf {
