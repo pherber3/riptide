@@ -179,6 +179,8 @@ enum Msg {
     Favorites(HashSet<u64>),
     Folders(Vec<Card>),
     Playlists(Vec<Playlist>),
+    /// A playlist just made, with a track already in it.
+    Created(Playlist),
     /// A short confirmation for the top bar.
     Notice(String),
     Lyrics(u64, Lyrics),
@@ -200,6 +202,8 @@ pub enum Action {
     Favorite(u64, bool),
     /// Add a track to one of the user's playlists (by id).
     AddToPlaylist(String, u64),
+    /// Make a playlist with this name and add a track to it.
+    CreatePlaylist(String, u64),
     Toggle,
     Next,
     Prev,
@@ -467,6 +471,11 @@ impl App {
                     Ok(Msg::Notice(notice))
                 });
             }
+            Action::CreatePlaylist(name, track) => self.spawn(async move {
+                let playlist = tidal.create_playlist(&name).await?;
+                tidal.add_to_playlist(&playlist.id, track).await?;
+                Ok(Msg::Created(playlist))
+            }),
             Action::Toggle => self.player.send(Cmd::Toggle),
             Action::Next => self.next(),
             Action::Prev => self.prev(),
@@ -530,6 +539,11 @@ impl App {
                 Msg::Folders(cards) => self.folders = cards,
                 Msg::Playlists(playlists) => self.playlists = playlists,
                 Msg::Notice(text) => self.notice = Some(text),
+                Msg::Created(playlist) => {
+                    self.notice = Some(format!("Added to {}", playlist.title));
+                    self.folders.insert(0, Card::Playlist(playlist.clone()));
+                    self.playlists.insert(0, playlist);
+                }
                 Msg::Lyrics(id, lyrics) => (self.lyrics, self.lyric_line) = (Some((id, Some(lyrics))), None),
                 Msg::Error(e) => (self.busy, self.loading, self.error) = (false, false, Some(e)),
                 Msg::Player(Event::Ended) if self.queue.repeat == Repeat::One => {

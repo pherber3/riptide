@@ -450,6 +450,14 @@ impl Tidal {
         }
     }
 
+    /// Makes a private playlist at the top level.
+    pub async fn create_playlist(&self, name: &str) -> Result<Playlist> {
+        let query = [("name", name), ("description", ""), ("folderId", "root"), ("isPublic", "false")];
+        let url = format!("{V2}/my-collection/playlists/folders/create-playlist");
+        let v: Value = self.send(Method::PUT, &url, &query, &[]).await?.json().await?;
+        playlist(&v["data"]).context("Tidal didn't return the new playlist")
+    }
+
     /// Appends a track to one of the user's playlists. Tidal asks for the playlist's current version.
     pub async fn add_to_playlist(&self, playlist: &str, track: u64) -> Result<()> {
         let url = format!("{V1}/playlists/{playlist}");

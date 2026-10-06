@@ -437,9 +437,20 @@ impl Rows<'_> {
         });
     }
 
+    /// A track's right-click menu, laid out like Tidal's: the track, then what to do with it.
     fn menu(&self, ui: &mut Ui, tracks: &[Track], i: usize, actions: &mut Vec<Action>) {
         let t = &tracks[i];
-        let mut item = |text: &str, action: Action| {
+        ui.set_min_width(240.0);
+        ui.spacing_mut().button_padding = vec2(12.0, 7.0);
+        ui.horizontal(|ui| {
+            picture(ui, art(t.cover.as_deref(), 80), 40.0, false);
+            ui.vertical(|ui| {
+                ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(14.0)).color(TEXT)).truncate());
+                ui.add(egui::Label::new(RichText::new(&t.artist).size(13.0).color(SECONDARY)).truncate());
+            });
+        });
+        ui.separator();
+        let item = |ui: &mut Ui, actions: &mut Vec<Action>, text: &str, action: Action| {
             if ui.button(text).clicked() {
                 actions.push(action);
                 ui.close();
@@ -447,37 +458,77 @@ impl Rows<'_> {
         };
         if self.queue {
             if i > 0 {
-                item("Move up", Action::Move(i, i - 1));
+                item(ui, actions, "Move up", Action::Move(i, i - 1));
             }
             if i + 1 < tracks.len() {
-                item("Move down", Action::Move(i, i + 1));
+                item(ui, actions, "Move down", Action::Move(i, i + 1));
             }
             if self.playing != Some(t.id) {
-                item("Remove from queue", Action::Remove(i));
+                item(ui, actions, "Remove from queue", Action::Remove(i));
             }
         } else {
-            item("Play next", Action::Enqueue(t.clone(), true));
-            item("Add to queue", Action::Enqueue(t.clone(), false));
-            item("Track radio", Action::Play(Source::TrackRadio(t.id)));
+            item(ui, actions, "Play next", Action::Enqueue(t.clone(), true));
+            item(ui, actions, "Add to queue", Action::Enqueue(t.clone(), false));
         }
+        ui.menu_button("Add to playlist", |ui| self.add_to_playlist(ui, t.id, actions));
+        let saved = self.favorites.contains(&t.id);
+        let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
+        item(ui, actions, collection, Action::Favorite(t.id, !saved));
+        item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
         if let Some(id) = t.album_id {
-            item("Go to album", Action::Open(Source::Album(id)));
+            item(ui, actions, "Go to album", Action::Open(Source::Album(id)));
         }
         if let Some(id) = t.artist_id {
-            item("Go to artist", Action::Open(Source::Artist(id)));
+            item(ui, actions, "Go to artist", Action::Open(Source::Artist(id)));
         }
-        if !self.playlists.is_empty() {
-            ui.menu_button("Add to playlist", |ui| {
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    for p in self.playlists {
-                        if ui.button(&p.title).clicked() {
-                            actions.push(Action::AddToPlaylist(p.id.clone(), t.id));
-                            ui.close();
-                        }
-                    }
-                });
-            });
+    }
+
+    /// The "Add to playlist" submenu: make a new one, or pick from the recent ones or any by name.
+    fn add_to_playlist(&self, ui: &mut Ui, track: u64, actions: &mut Vec<Action>) {
+        ui.set_min_width(240.0);
+        ui.spacing_mut().button_padding = vec2(12.0, 7.0);
+        let (new_id, filter_id) = (egui::Id::new("new playlist"), egui::Id::new("playlist filter"));
+        let mut name: Option<String> = ui.data(|d| d.get_temp(new_id));
+        match &mut name {
+            None => {
+                if ui.add(egui::Button::image_and_text(Icon::Plus.image(TEXT, 16.0), "Create new playlist")).clicked() {
+                    name = Some(String::new());
+                }
+            }
+            Some(text) => {
+                let edit = ui.add(egui::TextEdit::singleline(text).hint_text("Playlist name").desired_width(216.0));
+                if text.is_empty() && !edit.has_focus() {
+                    edit.request_focus();
+                }
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (enter || ui.button("Create and add").clicked()) && !text.trim().is_empty() {
+                    actions.push(Action::CreatePlaylist(text.trim().into(), track));
+                    name = None;
+                    ui.close();
+                }
+            }
         }
+        ui.data_mut(|d| match name {
+            Some(name) => {
+                d.insert_temp(new_id, name);
+            }
+            None => d.remove::<String>(new_id),
+        });
+        ui.separator();
+        let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+        ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Find a playlist").desired_width(216.0));
+        let needle = filter.to_lowercase();
+        ui.label(RichText::new(if needle.is_empty() { "RECENT" } else { "MATCHING" }).font(semibold(11.0)).color(DIM));
+        let shown = if needle.is_empty() { 10 } else { usize::MAX };
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            for p in self.playlists.iter().filter(|p| p.title.to_lowercase().contains(&needle)).take(shown) {
+                if ui.button(&p.title).clicked() {
+                    actions.push(Action::AddToPlaylist(p.id.clone(), track));
+                    ui.close();
+                }
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(filter_id, filter));
     }
 }
 

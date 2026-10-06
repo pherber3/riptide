@@ -47,6 +47,7 @@ fastframe_icons::icons! {
         Back => lucide "chevron-left",
         Forward => lucide "chevron-right",
         Down => lucide "chevron-down",
+        Plus => lucide "plus",
         Heart => "heart",
         HeartFilled => "heart-filled",
         Play => "play-filled",
