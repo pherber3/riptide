@@ -36,7 +36,8 @@ impl BytesLoader for Art {
     }
 
     fn load(&self, ctx: &egui::Context, uri: &str) -> BytesLoadResult {
-        let Some(name) = uri.strip_prefix("https://resources.tidal.com/images/") else {
+        let tidal = ["https://resources.tidal.com/images/", "https://images.tidal.com/"];
+        let Some(name) = tidal.iter().find_map(|prefix| uri.strip_prefix(prefix)) else {
             return Err(LoadError::NotSupported);
         };
         let mut entries = self.entries.lock().unwrap();
@@ -46,7 +47,7 @@ impl BytesLoader for Art {
             Some(Entry::Failed) => return Err(LoadError::Loading("artwork unavailable".into())),
             None => {}
         }
-        let path = self.dir.join(name.replace('/', "_"));
+        let path = self.dir.join(name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "_"));
         if let Ok(bytes) = std::fs::read(&path) {
             let bytes: Arc<[u8]> = bytes.into();
             entries.insert(uri.into(), Entry::Ready(bytes.clone()));

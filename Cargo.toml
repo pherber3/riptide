@@ -19,6 +19,7 @@ egui = "0.36"
 egui_extras = { version = "0.36", features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 
 [profile.dev.package."*"]

@@ -97,6 +97,31 @@ pub struct Lyrics {
     pub text: String,
 }
 
+/// A Tidal mix (a personal radio station); its artwork is a full URL.
+#[derive(Clone, Debug)]
+pub struct Mix {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub image: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Card {
+    Album(Album),
+    Artist(Artist),
+    Playlist(Playlist),
+    Mix(Mix),
+}
+
+/// One row of the home page.
+#[derive(Clone, Debug)]
+pub struct Shelf {
+    pub title: String,
+    pub cards: Vec<Card>,
+    pub tracks: Vec<Track>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Results {
     pub artists: Vec<Artist>,
@@ -236,6 +261,43 @@ impl Tidal {
         Ok((playlist(&info).context("bad playlist")?, items.iter().filter_map(track).collect()))
     }
 
+    /// Tidal's personal home feed: recently played, your top playlists, mixes and the rest.
+    pub async fn home(&mut self) -> Result<Vec<Shelf>> {
+        self.refresh().await?;
+        let token = self.client.session.auth.access_token.clone().context("not signed in")?;
+        let country = self.client.user_info.as_ref().map_or("US".into(), |u| u.country_code.clone());
+        let query = [("countryCode", country.as_str()), ("locale", "en_US"), ("deviceType", "BROWSER"), ("platform", "WEB"), ("limit", "20")];
+        let resp = self
+            .http
+            .get("https://api.tidal.com/v2/home/feed/static")
+            .header("x-tidal-client-version", "2026.1.5")
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await?;
+        let feed: Value = resp.error_for_status()?.json().await?;
+        let shelves = feed["items"].as_array().into_iter().flatten().filter_map(|module| {
+            let mut shelf = Shelf { title: text(&module["title"]), cards: Vec::new(), tracks: Vec::new() };
+            for item in module["items"].as_array()? {
+                let data = &item["data"];
+                match item["type"].as_str()? {
+                    "TRACK" => shelf.tracks.extend(track(data)),
+                    "ALBUM" => shelf.cards.extend(album(data).map(Card::Album)),
+                    "ARTIST" => shelf.cards.extend(artist(data).map(Card::Artist)),
+                    "PLAYLIST" => shelf.cards.extend(playlist(data).map(Card::Playlist)),
+                    "MIX" => shelf.cards.extend(mix(data).map(Card::Mix)),
+                    _ => {}
+                }
+            }
+            (!shelf.cards.is_empty() || !shelf.tracks.is_empty()).then_some(shelf)
+        });
+        Ok(shelves.collect())
+    }
+
+    pub async fn mix_tracks(&mut self, id: &str) -> Result<Vec<Track>> {
+        Ok(self.items(&format!("mixes/{id}/items"), &[], 1000).await?.iter().filter_map(track).collect())
+    }
+
     /// Tracks like this one, for radio.
     pub async fn track_radio(&mut self, id: u64) -> Result<Vec<Track>> {
         Ok(list(&self.get(&format!("tracks/{id}/radio"), &[("limit", "100")]).await?["items"], track))
@@ -372,6 +434,15 @@ fn album(v: &Value) -> Option<Album> {
 
 fn artist(v: &Value) -> Option<Artist> {
     Some(Artist { id: v["id"].as_u64()?, name: text(&v["name"]), picture: image_id(&v["picture"]) })
+}
+
+fn mix(v: &Value) -> Option<Mix> {
+    Some(Mix {
+        id: v["id"].as_str()?.into(),
+        title: text(&v["titleTextInfo"]["text"]),
+        subtitle: text(&v["subtitleTextInfo"]["text"]),
+        image: v["mixImages"][0]["url"].as_str().map(Into::into),
+    })
 }
 
 fn playlist(v: &Value) -> Option<Playlist> {

@@ -14,13 +14,15 @@ use tokio::sync::Mutex;
 use crate::art::Art;
 use crate::cache;
 use crate::player::{Cmd, Event, Player};
-use crate::tidal::{self, Album, Artist, Lyrics, Playlist, Quality, Results, Tidal, Track};
+use crate::tidal::{self, Album, Artist, Card, Lyrics, Mix, Playlist, Quality, Results, Shelf, Tidal, Track};
 
 const ACCENT: Color32 = Color32::from_rgb(0x33, 0xff, 0xee);
 const GOLD: Color32 = Color32::from_rgb(0xf5, 0xc5, 0x42);
 const ROW: f32 = 22.0;
 
 enum Page {
+    Home(Vec<Shelf>),
+    Mix(Mix, Vec<Track>),
     Search(Results),
     Album(Album, Vec<Track>),
     Artist(Artist, Vec<Track>, Vec<Album>),
@@ -65,6 +67,8 @@ enum Msg {
 
 enum Action {
     Search,
+    Home,
+    Mix(Mix),
     SearchPage,
     Album(u64),
     Artist(u64),
@@ -143,6 +147,7 @@ impl App {
         let cache = dir.join("cache");
         std::fs::create_dir_all(&cache)?;
         cache::evict(&cache, crate::CACHE_BYTES)?;
+        fastframe_fonts::FontSetup::default().install(&ctx);
         egui_extras::install_image_loaders(&ctx);
         ctx.add_bytes_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
         let (tx, rx) = channel();
@@ -174,7 +179,7 @@ impl App {
             player,
             controls,
             shown: np::State::default(),
-            page: Page::Search(Results::default()),
+            page: Page::Loading,
             back: Vec::new(),
             view: View::default(),
             query: String::new(),
@@ -315,6 +320,11 @@ impl App {
                 })
             }),
             Action::Queue => self.show(Page::Queue),
+            Action::Home => self.navigate(home_page(tidal)),
+            Action::Mix(mix) => self.navigate(async move {
+                let tracks = tidal.lock().await.mix_tracks(&mix.id).await?;
+                Ok(Page::Mix(mix, tracks))
+            }),
             Action::Lyrics if matches!(self.page, Page::Lyrics) => self.apply(Action::Back),
             Action::Lyrics => self.show(Page::Lyrics),
             Action::ShufflePlay(mut tracks) => {
@@ -440,6 +450,8 @@ impl App {
                     let tidal = Arc::new(Mutex::new(*tidal));
                     self.tidal = Some(tidal.clone());
                     (self.busy, self.login) = (false, None);
+                    self.spawn(async move { Ok(Msg::Page(home_page(tidal).await?)) });
+                    let tidal = self.tidal.clone().expect("just signed in");
                     self.spawn(async move { Ok(Msg::Favorites(tidal.lock().await.favorite_ids().await?)) });
                 }
                 Msg::Favorites(ids) => self.favorites = ids,
@@ -547,6 +559,7 @@ impl App {
                     actions.push(action);
                 }
             };
+            item(ui, matches!(self.page, Page::Home(_)), "Home", Action::Home);
             item(ui, matches!(self.page, Page::Search(_)), "Search", Action::SearchPage);
             item(ui, matches!(self.page, Page::Queue), "Queue", Action::Queue);
             ui.add_space(16.0);
@@ -565,7 +578,7 @@ impl App {
                 let track = self.index.and_then(|i| self.queue.get(i));
                 cols[0].horizontal_centered(|ui| {
                     if let Some(t) = track {
-                        picture(ui, t.cover.as_deref(), 160, 60.0, false);
+                        picture(ui, art(t.cover.as_deref(), 160), 60.0, false);
                         ui.vertical(|ui| {
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
@@ -690,16 +703,35 @@ impl App {
                     ui.add_space(40.0);
                     ui.vertical_centered(|ui| ui.spinner());
                 }
+                Page::Home(shelves) => {
+                    for (n, shelf) in shelves.iter().enumerate() {
+                        section(ui, &shelf.title);
+                        if !shelf.cards.is_empty() {
+                            egui::ScrollArea::horizontal().id_salt(("shelf", n)).show(ui, |ui| {
+                                ui.horizontal(|ui| actions.extend(shelf.cards.iter().filter_map(|c| home_card(ui, c))));
+                            });
+                        }
+                        if !shelf.tracks.is_empty() {
+                            list(false).show(ui, &shelf.tracks, None, true, None, actions);
+                        }
+                    }
+                }
+                Page::Mix(mix, tracks) => {
+                    if let Some(start) = header(ui, mix.image.clone(), false, &mix.title, &mix.subtitle, false) {
+                        actions.push(start.action(tracks.clone(), 0));
+                    }
+                    list(false).show(ui, tracks, None, true, None, actions);
+                }
                 Page::Search(r) => search_page(ui, r, &list(false), actions),
                 Page::Album(album, tracks) => {
                     let sub = format!("{} · {}", album.artist, album.year);
-                    if let Some(start) = header(ui, album.cover.as_deref(), 640, false, &album.title, &sub, false) {
+                    if let Some(start) = header(ui, art(album.cover.as_deref(), 640), false, &album.title, &sub, false) {
                         actions.push(start.action(tracks.clone(), 0));
                     }
                     list(false).show(ui, tracks, None, false, None, actions);
                 }
                 Page::Artist(artist, top, albums) => {
-                    if let Some(start) = header(ui, artist.picture.as_deref(), 480, true, &artist.name, "", true) {
+                    if let Some(start) = header(ui, art(artist.picture.as_deref(), 480), true, &artist.name, "", true) {
                         actions.push(start.action(top.clone(), artist.id));
                     }
                     section(ui, "Top tracks");
@@ -709,7 +741,7 @@ impl App {
                 }
                 Page::Playlist(playlist, tracks) => {
                     let sub = format!("{} tracks", playlist.count);
-                    if let Some(start) = header(ui, playlist.cover.as_deref(), 640, false, &playlist.title, &sub, false) {
+                    if let Some(start) = header(ui, art(playlist.cover.as_deref(), 640), false, &playlist.title, &sub, false) {
                         actions.push(start.action(in_order(tracks, self.view.rows.as_deref()), 0));
                     }
                     filter_box(ui, &mut self.view, "Filter playlist on title, artist or album");
@@ -1060,28 +1092,49 @@ fn heart(ui: &mut Ui, id: u64, favorites: &HashSet<u64>, actions: &mut Vec<Actio
     }
 }
 
-fn picture(ui: &mut Ui, image: Option<&str>, size: u32, side: f32, round: bool) -> egui::Response {
+/// A Tidal image id as a URL at one of its sizes.
+fn art(id: Option<&str>, size: u32) -> Option<String> {
+    id.map(|id| tidal::image(id, size))
+}
+
+/// Artwork, loaded only once it scrolls into view so long shelves and grids don't fill memory.
+fn picture(ui: &mut Ui, url: Option<String>, side: f32, round: bool) -> egui::Response {
     let radius = if round { side / 2.0 } else { 4.0 };
-    match image {
-        Some(id) => ui.add(
-            egui::Image::new(tidal::image(id, size))
-                .fit_to_exact_size(vec2(side, side))
-                .corner_radius(radius)
-                .sense(Sense::click()),
-        ),
-        None => {
-            let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
-            ui.painter().rect_filled(rect, radius, ui.visuals().faint_bg_color);
-            response
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    ui.painter().rect_filled(rect, radius, ui.visuals().faint_bg_color);
+    if let Some(url) = url
+        && ui.is_rect_visible(rect)
+    {
+        egui::Image::new(url).corner_radius(radius).paint_at(ui, rect);
+    }
+    response
+}
+
+fn home_card(ui: &mut Ui, card_data: &Card) -> Option<Action> {
+    match card_data {
+        Card::Album(a) => card(ui, art(a.cover.as_deref(), 320), false, &a.title, &a.artist).then_some(Action::Album(a.id)),
+        Card::Artist(a) => card(ui, art(a.picture.as_deref(), 320), true, &a.name, "Artist").then_some(Action::Artist(a.id)),
+        Card::Playlist(p) => {
+            card(ui, art(p.cover.as_deref(), 320), false, &p.title, &format!("{} tracks", p.count)).then(|| Action::Playlist(p.id.clone()))
         }
+        Card::Mix(m) => card(ui, m.image.clone(), false, &m.title, &m.subtitle).then(|| Action::Mix(m.clone())),
+    }
+}
+
+/// Tidal's home feed, or your playlists if it can't be had.
+async fn home_page(tidal: Arc<Mutex<Tidal>>) -> Result<Page> {
+    let mut tidal = tidal.lock().await;
+    match tidal.home().await {
+        Ok(shelves) if !shelves.is_empty() => Ok(Page::Home(shelves)),
+        _ => Ok(Page::Playlists(tidal.playlists().await?)),
     }
 }
 
 /// Big artwork, title and Play / Shuffle (/ Artist radio) buttons.
-fn header(ui: &mut Ui, image: Option<&str>, size: u32, round: bool, title: &str, subtitle: &str, radio: bool) -> Option<Start> {
+fn header(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle: &str, radio: bool) -> Option<Start> {
     let mut start = None;
     ui.horizontal(|ui| {
-        picture(ui, image, size, 200.0, round);
+        picture(ui, image, 200.0, round);
         ui.vertical(|ui| {
             ui.add_space(110.0);
             ui.label(RichText::new(title).size(30.0).strong());
@@ -1093,11 +1146,11 @@ fn header(ui: &mut Ui, image: Option<&str>, size: u32, round: bool, title: &str,
     start
 }
 
-fn card(ui: &mut Ui, image: Option<&str>, round: bool, title: &str, subtitle: &str) -> bool {
+fn card(ui: &mut Ui, image: Option<String>, round: bool, title: &str, subtitle: &str) -> bool {
     let mut clicked = false;
     ui.allocate_ui(vec2(160.0, 216.0), |ui| {
         ui.vertical(|ui| {
-            clicked |= picture(ui, image, 320, 160.0, round).clicked();
+            clicked |= picture(ui, image, 160.0, round).clicked();
             clicked |= ui.add(egui::Label::new(RichText::new(title).strong()).truncate().sense(Sense::click())).clicked();
             ui.add(egui::Label::new(RichText::new(subtitle).weak()).truncate());
         });
@@ -1108,7 +1161,7 @@ fn card(ui: &mut Ui, image: Option<&str>, round: bool, title: &str, subtitle: &s
 fn album_cards(ui: &mut Ui, albums: &[Album], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         for a in ordered(albums, order) {
-            if card(ui, a.cover.as_deref(), false, &a.title, &format!("{} · {}", a.artist, a.year)) {
+            if card(ui, art(a.cover.as_deref(), 320), false, &a.title, &format!("{} · {}", a.artist, a.year)) {
                 actions.push(Action::Album(a.id));
             }
         }
@@ -1118,7 +1171,7 @@ fn album_cards(ui: &mut Ui, albums: &[Album], order: Option<&[usize]>, actions: 
 fn artist_cards(ui: &mut Ui, artists: &[Artist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         for a in ordered(artists, order) {
-            if card(ui, a.picture.as_deref(), true, &a.name, "Artist") {
+            if card(ui, art(a.picture.as_deref(), 320), true, &a.name, "Artist") {
                 actions.push(Action::Artist(a.id));
             }
         }
@@ -1128,7 +1181,7 @@ fn artist_cards(ui: &mut Ui, artists: &[Artist], order: Option<&[usize]>, action
 fn playlist_cards(ui: &mut Ui, playlists: &[Playlist], order: Option<&[usize]>, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         for p in ordered(playlists, order) {
-            if card(ui, p.cover.as_deref(), false, &p.title, &format!("{} tracks", p.count)) {
+            if card(ui, art(p.cover.as_deref(), 320), false, &p.title, &format!("{} tracks", p.count)) {
                 actions.push(Action::Playlist(p.id.clone()));
             }
         }
