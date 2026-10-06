@@ -342,9 +342,20 @@ impl App {
                 ui.add_space(64.0);
                 let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
                 let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+                // The lyrics show in full beside the cover and its title, and fade out just above and
+                // below them; the playing line sits level with the middle of the cover.
+                const FADE: f32 = 56.0;
+                let (column, lead) = (side + 70.0, top.min(FADE));
                 ui.vertical(|ui| {
-                    scroll.show(ui, |ui| {
-                        ui.add_space(top);
+                    ui.add_space(top - lead);
+                    scroll.max_height(column + 2.0 * lead).show(ui, |ui| {
+                        let from = ui.clip_rect().top() + lead;
+                        let shown = |ui: &Ui, color: Color32| {
+                            let y = ui.cursor().top() + 20.0;
+                            let f = (1.0 - (from - y).max(y - from - column).max(0.0) / FADE).clamp(0.0, 1.0);
+                            color.gamma_multiply(f * f * (3.0 - 2.0 * f))
+                        };
+                        ui.add_space(lead);
                         let line = |text: &str, color| RichText::new(text).font(bold(34.0)).color(color);
                         match lyrics {
                             None => {
@@ -354,13 +365,16 @@ impl App {
                                 ui.label(line("No lyrics for this track.", soft));
                             }
                             Some(l) if l.synced.is_empty() => {
-                                ui.label(RichText::new(&l.text).font(semibold(24.0)).color(Color32::WHITE));
+                                for words in l.text.lines() {
+                                    let color = shown(ui, Color32::WHITE);
+                                    ui.label(RichText::new(words).font(semibold(24.0)).color(color));
+                                }
                             }
                             Some(l) => {
                                 let position = self.player.status.position();
                                 let now = l.synced.iter().rposition(|(at, _)| *at <= position);
                                 for (n, (at, words)) in l.synced.iter().enumerate() {
-                                    let color = if Some(n) == now { Color32::WHITE } else { faint };
+                                    let color = shown(ui, if Some(n) == now { Color32::WHITE } else { faint });
                                     let words = if words.is_empty() { "♪" } else { words };
                                     let response = ui.add(egui::Label::new(line(words, color)).selectable(false).sense(Sense::click()));
                                     if Some(n) == now && self.lyric_line != now {
@@ -374,7 +388,7 @@ impl App {
                                 self.lyric_line = now;
                             }
                         }
-                        ui.add_space(height / 2.0);
+                        ui.add_space(column / 2.0);
                     })
                 });
             });
