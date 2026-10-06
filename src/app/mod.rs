@@ -130,8 +130,7 @@ pub struct App {
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
-    /// How high the lyrics view's tide stands, 0 to 1, easing toward the music's loudness.
-    tide: f32,
+    tide: crate::widgets::Tide,
     /// The seek bar's position while it is being dragged.
     dragging: Option<f64>,
     tray: Option<fastframe_tray::Tray>,
@@ -217,7 +216,7 @@ impl App {
             lyrics_open: false,
             lyrics: None,
             lyric_line: None,
-            tide: 0.0,
+            tide: Default::default(),
             dragging: None,
             hidden: false,
             quitting: false,
@@ -538,7 +537,7 @@ impl eframe::App for App {
         // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
         let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
         let mood = cover.and_then(|url| crate::art::tint(&url));
-        let before = (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray);
+        let before = (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray, self.settings.tide);
         // The bar takes the tint too, where its text stays light on it.
         self.player_bar(ui, mood.filter(|_| theme::p().dark), &mut actions);
         if self.lyrics_open {
@@ -549,7 +548,7 @@ impl eframe::App for App {
             self.content(ui, &mut actions);
         }
         // What the settings page changed takes effect, and is kept.
-        if before != (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray) {
+        if before != (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray, self.settings.tide) {
             if before.0 != self.settings.device {
                 self.player.send(Cmd::Device(self.settings.device.clone()));
             }

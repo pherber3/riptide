@@ -26,6 +26,8 @@ pub struct Settings {
     pub device: Option<String>,
     /// The theme: a palette file's name in `data/themes`, or Riptide's own look.
     pub theme: Option<String>,
+    /// Waves along the bottom of the lyrics view that move with the music.
+    pub tide: bool,
     /// The window's outer position and inner size (x, y, width, height), while not maximized.
     pub window: Option<[f32; 4]>,
     pub maximized: bool,
@@ -35,7 +37,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, theme: None, window: None, maximized: false, sorts: HashMap::new() }
+        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, theme: None, tide: true, window: None, maximized: false, sorts: HashMap::new() }
     }
 }
 
@@ -81,6 +83,12 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
                     ui.selectable_value(&mut s.theme, Some(theme.filename.clone()), fastframe_theme::display_name(&theme.filename));
                 }
             });
+        });
+        ui.separator();
+        row(ui, "Tide", "Waves along the bottom of the lyrics view that rise and roll with the music", |ui| {
+            if switch(ui, s.tide).clicked() {
+                s.tide = !s.tide;
+            }
         });
     });
     card(ui, "Playback", |ui| {

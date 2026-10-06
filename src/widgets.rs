@@ -173,33 +173,54 @@ fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
 }
 
 /// The tide along the bottom of the lyrics view: three layers of water drifting across each other,
-/// standing higher as `swell` (0 to 1) rises with the music.
-pub fn tide(ui: &Ui, rect: Rect, swell: f32) {
-    const STEPS: u32 = 96;
-    let time = ui.input(|i| i.time);
-    let painter = ui.painter_at(rect);
-    // Back to front: fainter, higher and slower behind; each layer drifts its own way.
-    for (layer, (alpha, scale, speed, offset)) in [(10u8, 0.7, 0.21, 0.0), (16, 0.85, -0.29, 2.1), (24, 1.0, 0.37, 4.2)].into_iter().enumerate() {
-        let base = rect.bottom() - rect.height() * (0.55 - 0.15 * layer as f32);
-        let height = (4.0 + 30.0 * swell) * scale;
-        let k = std::f32::consts::TAU / (rect.width() * (0.9 - 0.2 * layer as f32)).max(1.0);
-        let turn = |rate: f64| (time * speed * rate).rem_euclid(std::f64::consts::TAU) as f32 + offset;
-        let (long, short) = (turn(1.0), turn(-1.4));
-        let (crest, deep) = (Color32::from_white_alpha(alpha), Color32::from_white_alpha(alpha / 4));
-        let mut water = egui::Mesh::default();
-        for i in 0..=STEPS {
-            let x = rect.left() + rect.width() * i as f32 / STEPS as f32;
-            let u = k * (x - rect.left());
-            let y = base - height * (0.65 * (u + long).sin() + 0.35 * (2.3 * u + short).sin());
-            water.colored_vertex(pos2(x, y), crest);
-            water.colored_vertex(pos2(x, rect.bottom()), deep);
-            if i > 0 {
-                let v = 2 * i;
-                water.add_triangle(v - 2, v - 1, v);
-                water.add_triangle(v - 1, v, v + 1);
+/// standing higher and rolling faster as the music gets louder.
+#[derive(Default)]
+pub struct Tide {
+    /// How high it stands, 0 to 1.
+    swell: f32,
+    /// How far the water has rolled.
+    travel: f64,
+}
+
+impl Tide {
+    /// Moves on `dt` seconds toward the music's loudness (RMS `level`). Returns whether it is still
+    /// settling.
+    pub fn step(&mut self, level: f32, dt: f32) -> bool {
+        let target = (level * 3.0).min(1.0);
+        // Slow both ways, so it follows verses and choruses rather than each drum hit.
+        let rate = if target > self.swell { 2.5 } else { 0.8 };
+        self.swell += (target - self.swell) * (1.0 - (-rate * dt).exp());
+        self.travel += f64::from(dt * (0.6 + 1.4 * self.swell));
+        self.swell > 0.005
+    }
+
+    pub fn paint(&self, ui: &Ui, rect: Rect) {
+        const STEPS: u32 = 96;
+        let (swell, travel) = (self.swell, self.travel);
+        let painter = ui.painter_at(rect);
+        // Back to front: fainter, higher and slower behind; each layer drifts its own way.
+        for (layer, (alpha, scale, speed, offset)) in [(10u8, 0.7, 0.21, 0.0), (16, 0.85, -0.29, 2.1), (24, 1.0, 0.37, 4.2)].into_iter().enumerate() {
+            let base = rect.bottom() - rect.height() * (0.55 - 0.15 * layer as f32);
+            let height = (4.0 + 30.0 * swell) * scale;
+            let k = std::f32::consts::TAU / (rect.width() * (0.9 - 0.2 * layer as f32)).max(1.0);
+            let turn = |rate: f64| (travel * speed * rate).rem_euclid(std::f64::consts::TAU) as f32 + offset;
+            let (long, short) = (turn(1.0), turn(-1.4));
+            let (crest, deep) = (Color32::from_white_alpha(alpha), Color32::from_white_alpha(alpha / 4));
+            let mut water = egui::Mesh::default();
+            for i in 0..=STEPS {
+                let x = rect.left() + rect.width() * i as f32 / STEPS as f32;
+                let u = k * (x - rect.left());
+                let y = base - height * (0.65 * (u + long).sin() + 0.35 * (2.3 * u + short).sin());
+                water.colored_vertex(pos2(x, y), crest);
+                water.colored_vertex(pos2(x, rect.bottom()), deep);
+                if i > 0 {
+                    let v = 2 * i;
+                    water.add_triangle(v - 2, v - 1, v);
+                    water.add_triangle(v - 1, v, v + 1);
+                }
             }
+            painter.add(water);
         }
-        painter.add(water);
     }
 }
 
