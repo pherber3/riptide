@@ -91,12 +91,17 @@ impl ImageLoader for Art {
             // File work and decoding run on the blocking pool, off the async workers.
             let cached = path.clone();
             let mut image = tokio::task::spawn_blocking(move || decode(&std::fs::read(cached).ok()?)).await.ok().flatten();
+            let fetch = |uri: String| async move {
+                let _permit = FETCHES.acquire().await;
+                http.get(&uri).send().await?.error_for_status()?.bytes().await
+            };
+            // New artwork (a playlist just made) can be missing at the bigger sizes for a while.
+            let smaller = uri.rsplit_once('/').filter(|(_, file)| *file != "320x320.jpg").map(|(base, _)| format!("{base}/320x320.jpg"));
             if image.is_none()
-                && let Ok(bytes) = async {
-                    let _permit = FETCHES.acquire().await;
-                    http.get(&uri).send().await?.error_for_status()?.bytes().await
+                && let Ok(bytes) = match fetch(uri.clone()).await {
+                    Err(_) if let Some(smaller) = smaller => fetch(smaller).await,
+                    result => result,
                 }
-                .await
             {
                 image = tokio::task::spawn_blocking(move || {
                     let _ = std::fs::write(&path, &bytes);

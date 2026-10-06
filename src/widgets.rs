@@ -12,6 +12,8 @@ const NUMBER: f32 = 36.0;
 const TIME: f32 = 56.0;
 const HEART: f32 = 32.0;
 const THUMB: f32 = 38.0;
+/// Menus that hold a text field: a click inside (in the field) mustn't close them.
+const KEEP_OPEN: egui::PopupCloseBehavior = egui::PopupCloseBehavior::CloseOnClickOutside;
 
 pub fn tier_color(quality: Quality) -> Color32 {
     match quality {
@@ -109,7 +111,7 @@ pub fn bar(ui: &mut Ui, value: &mut f64, max: f64, width: f32, enabled: bool) ->
 
 /// A sidebar entry, filled when selected or hovered.
 pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click_and_drag());
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -150,7 +152,11 @@ fn paint_picture(ui: &Ui, url: Option<String>, rect: Rect, round: bool) {
     if let Some(url) = url
         && ui.is_rect_visible(rect)
     {
-        egui::Image::new(url).corner_radius(radius).paint_at(ui, rect);
+        // Artwork that can't be had leaves the plain tile rather than egui's error mark.
+        let image = egui::Image::new(url).corner_radius(radius);
+        if image.load_for_size(ui.ctx(), rect.size()).is_ok() {
+            image.paint_at(ui, rect);
+        }
     }
 }
 
@@ -290,10 +296,15 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, rows: &Rows, actions: &mut V
     start
 }
 
-/// Rename, move or delete one of the user's own playlists.
+/// The ⋯ menu of one of the user's own playlists.
 fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: &mut Vec<Action>) {
     let more = egui::Button::image(Icon::More.image(SECONDARY, 22.0)).frame(false);
-    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
+    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| playlist_actions(ui, id, title, folders, actions));
+}
+
+/// Rename, move or delete one of the user's own playlists: its ⋯ menu, or right-click in the sidebar.
+pub fn playlist_actions(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: &mut Vec<Action>) {
+    {
         ui.set_min_width(220.0);
         ui.spacing_mut().button_padding = vec2(12.0, 7.0);
         if ui.button("Rename").clicked() {
@@ -319,7 +330,7 @@ fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: 
                 ui.close();
             }
         });
-    });
+    }
 }
 
 /// An on/off switch.
@@ -577,7 +588,7 @@ impl Rows<'_> {
                 if row.double_clicked() {
                     actions.push(play());
                 }
-                row.context_menu(|ui| self.menu(ui, tracks, i, actions));
+                egui::Popup::context_menu(&row).close_behavior(KEEP_OPEN).show(|ui| self.menu(ui, tracks, i, actions));
             }
         });
     }
@@ -618,7 +629,8 @@ impl Rows<'_> {
         if let Some(playlist) = self.editing {
             item(ui, actions, "Remove from this playlist", Action::RemoveFromPlaylist(playlist.into(), i));
         }
-        ui.menu_button("Add to playlist", |ui| self.add_to_playlist(ui, t.id, actions));
+        let config = egui::containers::menu::MenuConfig::new().close_behavior(KEEP_OPEN);
+        egui::containers::menu::SubMenuButton::new("Add to playlist").config(config).ui(ui, |ui| self.add_to_playlist(ui, t.id, actions));
         let saved = self.favorites.contains(&t.id);
         let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
         item(ui, actions, collection, Action::Favorite(t.id, !saved));

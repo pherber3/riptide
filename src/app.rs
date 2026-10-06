@@ -19,7 +19,7 @@ use crate::queue::{self, Queue, Repeat};
 use crate::tidal::{self, Card, Item, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
-use crate::widgets::{PlaylistForm, Target, Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
+use crate::widgets::{PlaylistForm, Target, playlist_actions, Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
@@ -244,6 +244,9 @@ pub enum Action {
     Lyrics,
     FocusSearch,
 }
+
+/// A playlist being dragged in the sidebar: id and title.
+struct Dragged(String, String);
 
 /// A sign-in in progress and what the user pasted.
 struct Login {
@@ -910,8 +913,33 @@ impl App {
                         _ => continue,
                     };
                     let mut response = nav_item(ui, icon, text, selected);
-                    if let Card::Folder { count, .. } = card {
-                        response = response.on_hover_text(format!("{count} playlists"));
+                    match card {
+                        // A playlist dragged onto a folder moves into it.
+                        Card::Folder { id, count, .. } => {
+                            if response.dnd_hover_payload::<Dragged>().is_some() {
+                                ui.painter().rect_stroke(response.rect, 8.0, egui::Stroke::new(1.5, ACCENT), egui::StrokeKind::Inside);
+                            }
+                            if let Some(dragged) = response.dnd_release_payload::<Dragged>() {
+                                actions.push(Action::MovePlaylist(dragged.0.clone(), id.clone()));
+                            }
+                            response = response.on_hover_text(format!("{count} playlists"));
+                        }
+                        Card::Playlist(p) => {
+                            if response.drag_started() {
+                                egui::DragAndDrop::set_payload(ui.ctx(), Dragged(p.id.clone(), p.title.clone()));
+                            }
+                            let mine = self.playlists.iter().any(|own| own.id == p.id);
+                            response.context_menu(|ui| match mine {
+                                true => playlist_actions(ui, &p.id, &p.title, &self.folders, actions),
+                                false => {
+                                    if ui.button("Remove from your Playlists").clicked() {
+                                        actions.push(Action::Save(Item::Playlist(p.id.clone()), false));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
                     }
                     if response.clicked() {
                         actions.push(Action::Open(Source::open(card)));
@@ -919,6 +947,17 @@ impl App {
                 }
             });
         });
+    }
+
+    /// The playlist being dragged in the sidebar, drawn under the pointer.
+    fn drag_label(&self, ctx: &egui::Context) {
+        let (Some(dragged), Some(at)) = (egui::DragAndDrop::payload::<Dragged>(ctx), ctx.pointer_interact_pos()) else { return };
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dragged playlist")));
+        let galley = painter.layout_no_wrap(dragged.1.clone(), semibold(13.0), TEXT);
+        let rect = egui::Rect::from_min_size(at + vec2(14.0, 6.0), galley.size() + vec2(20.0, 12.0));
+        painter.rect_filled(rect, 8.0, theme::HOVER);
+        painter.galley(rect.min + vec2(10.0, 6.0), galley, TEXT);
     }
 
     fn player_bar(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
@@ -1253,6 +1292,7 @@ impl eframe::App for App {
             self.queue_panel(ui, &mut actions);
             self.content(ui, &mut actions);
         }
+        self.drag_label(ui.ctx());
         if let Some(form) = &mut self.form {
             match crate::widgets::playlist_dialog(ui.ctx(), form) {
                 Some(true) => {
