@@ -366,13 +366,14 @@ impl App {
         let (dir, quality) = (self.cache.clone(), self.quality);
         let id = self.queue.tracks[index].id;
         let next = self.queue.tracks.get(index + 1).map(|t| t.id);
+        cache::keep_only(&[id, next.unwrap_or(id)].map(|id| cache::path(&dir, id, quality)));
         self.spawn(async move {
             let reader = cache::track(&tidal, &dir, id, quality).await?;
             // Download the next track once this one is in, so it starts instantly without slowing this one.
             if let Some(next) = next {
                 let download = reader.download();
                 tokio::spawn(async move {
-                    let _ = tokio::task::spawn_blocking(move || download.wait()).await;
+                    download.finished().await;
                     cache::track(&tidal, &dir, next, quality).await
                 });
             }

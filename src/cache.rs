@@ -15,8 +15,11 @@ const PARALLEL: usize = 4;
 /// Serialises starting downloads, so two requests for one track (prefetch, then play) can't both start it.
 static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Downloads in progress, so a second reader (prefetch, then play) shares the first download.
-static ACTIVE: LazyLock<Mutex<HashMap<PathBuf, Shared>>> = LazyLock::new(Default::default);
+/// Downloads in progress, so a second reader (prefetch, then play) shares the first download, and
+/// so downloads of tracks skipped past can be cancelled.
+static ACTIVE: LazyLock<Mutex<HashMap<PathBuf, Active>>> = LazyLock::new(Default::default);
+
+type Active = (Shared, Option<tokio::task::AbortHandle>);
 
 #[derive(Default)]
 struct Progress {
@@ -27,11 +30,14 @@ struct Progress {
 
 type Shared = Arc<(Mutex<Progress>, Condvar)>;
 
+/// Writes a download. However it ends (finished, failed, or cancelled by dropping it), its readers
+/// are told, so none waits forever.
 pub struct Writer {
     file: File,
     shared: Shared,
     path: PathBuf,
     held: Option<u64>,
+    result: Result<(), String>,
 }
 
 /// Reads a file that may still be downloading, blocking until bytes arrive.
@@ -50,13 +56,14 @@ pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
     let file = File::create(path)?;
     let shared = Shared::default();
     let reader = Reader { file: File::open(path)?, pos: 0, shared: shared.clone() };
-    ACTIVE.lock().unwrap().insert(path.into(), shared.clone());
-    Ok((Writer { file, shared, path: path.into(), held: None }, reader))
+    ACTIVE.lock().unwrap().insert(path.into(), (shared.clone(), None));
+    let result = Err("download cancelled".into());
+    Ok((Writer { file, shared, path: path.into(), held: None, result }, reader))
 }
 
 /// A reader for a finished or in-progress download.
 pub fn open(path: &Path) -> Option<Reader> {
-    if let Some(shared) = ACTIVE.lock().unwrap().get(path) {
+    if let Some((shared, _)) = ACTIVE.lock().unwrap().get(path) {
         return Some(Reader { file: File::open(path).ok()?, pos: 0, shared: shared.clone() });
     }
     if !marker(path).exists() {
@@ -86,10 +93,15 @@ impl Writer {
         self.held = Some(0);
     }
 
-    pub fn finish(self, result: Result<(), String>) {
-        let result = result.and_then(|()| {
-            self.file.sync_all().and_then(|()| File::create(marker(&self.path)).map(drop)).map_err(|e| e.to_string())
-        });
+    pub fn finish(mut self, result: Result<(), String>) {
+        self.result = result;
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let result = std::mem::replace(&mut self.result, Ok(()));
+        let result = result.and_then(|()| File::create(marker(&self.path)).map(drop).map_err(|e| e.to_string()));
         let (lock, cv) = &*self.shared;
         let mut p = lock.lock().unwrap();
         p.written += self.held.unwrap_or(0);
@@ -101,9 +113,23 @@ impl Writer {
     }
 }
 
+pub fn path(dir: &Path, id: u64, quality: Quality) -> PathBuf {
+    dir.join(format!("{id}-{quality:?}"))
+}
+
+/// Cancels the downloads of every track but these, so skipping ahead doesn't leave old tracks
+/// competing for bandwidth.
+pub fn keep_only(keep: &[PathBuf]) {
+    let active = ACTIVE.lock().unwrap();
+    let cancel: Vec<_> = active.iter().filter(|(path, _)| !keep.contains(path)).filter_map(|(_, (_, task))| task.clone()).collect();
+    // Unlocked first: a cancelled download's writer takes the lock as it finishes.
+    drop(active);
+    cancel.iter().for_each(tokio::task::AbortHandle::abort);
+}
+
 /// A reader for a track, downloading it into the cache unless it is already there or on its way.
 pub async fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Result<Reader> {
-    let path = dir.join(format!("{id}-{quality:?}"));
+    let path = path(dir, id, quality);
     if let Some(reader) = open(&path) {
         return Ok(reader);
     }
@@ -113,7 +139,10 @@ pub async fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Resu
     }
     let parts = tidal.stream(id, quality).await?;
     let (writer, reader) = create(&path)?;
-    tokio::spawn(async move { fetch(&parts, writer).await });
+    let task = tokio::spawn(async move { fetch(&parts, writer).await });
+    if let Some(active) = ACTIVE.lock().unwrap().get_mut(&path) {
+        active.1 = Some(task.abort_handle());
+    }
     Ok(reader)
 }
 
@@ -127,9 +156,10 @@ impl Download {
         self.0.0.lock().unwrap().done
     }
 
-    pub fn wait(&self) {
-        let (lock, cv) = &*self.0;
-        drop(cv.wait_while(lock.lock().unwrap(), |p| !p.done).unwrap());
+    pub async fn finished(&self) {
+        while !self.done() {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 }
 
