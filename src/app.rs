@@ -20,7 +20,7 @@ use crate::queue::{self, Queue, Repeat};
 use crate::tidal::{self, Card, Item, Lyrics, Mix, Playlist, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use crate::theme::{self, ACCENT, BAR, DANGER, DIM, Icon, LINE, SECONDARY, SIDEBAR, TEXT, bold, semibold};
-use crate::widgets::{PlaylistForm, Target, playlist_actions, Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
+use crate::widgets::{Confirm, PlaylistForm, Target, playlist_actions, Rows, art, bar, clickable, clock, heart, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
@@ -263,6 +263,10 @@ pub enum Action {
     MoveInPlaylist(String, usize, usize),
     RenameFolder(String, String),
     DeleteFolder(String),
+    /// Ask before doing something that can't be undone.
+    Confirm(Box<Confirm>),
+    /// Back to the list's own order (a playlist's, or most recently added first).
+    ResetSort,
     DisconnectLastFm,
     /// Play through this output device, or the system default.
     Device(Option<String>),
@@ -323,6 +327,8 @@ pub struct App {
     folders: Vec<Card>,
     /// A track's credits (title, then role and names), while they are shown.
     credits: Option<(String, Vec<(String, String)>)>,
+    /// A question waiting for an answer before something that can't be undone.
+    confirm: Option<Confirm>,
     /// The Create / Rename playlist dialog, while it is open.
     form: Option<PlaylistForm>,
     /// The user's own playlists, for "Add to playlist".
@@ -447,6 +453,7 @@ impl App {
             folders: Vec::new(),
             playlists: Vec::new(),
             form: None,
+            confirm: None,
             credits: None,
             notice: None,
             queue_open: false,
@@ -854,14 +861,19 @@ impl App {
             Action::Shuffle => self.queue.set_shuffle(!self.queue.shuffled()),
             Action::Repeat => self.queue.cycle_repeat(),
             // Sorting by the current column again reverses it, as Tidal does.
-            Action::Sort(sort) => {
+            // A column sorts, then sorts the other way, then goes back to the list's own order.
+            Action::Sort(_) | Action::ResetSort => {
                 if let Some(view) = self.page.as_mut().and_then(|p| p.view.as_mut()) {
-                    view.reverse = view.sort == sort && !view.reverse;
-                    view.sort = sort;
-                    self.sorts.insert(view.key.into(), (sort, view.reverse));
+                    (view.sort, view.reverse) = match action {
+                        Action::Sort(sort) if view.sort != sort => (sort, false),
+                        Action::Sort(sort) if !view.reverse => (sort, true),
+                        _ => (Sort::Added, false),
+                    };
+                    self.sorts.insert(view.key.into(), (view.sort, view.reverse));
                     self.save_settings();
                 }
             }
+            Action::Confirm(confirm) => self.confirm = Some(*confirm),
             Action::Step(back) => {
                 self.lyrics_open = false;
                 self.step(back);
@@ -1103,13 +1115,11 @@ impl App {
                                     actions.push(Action::PlaylistForm(Target::RenameFolder(id.clone()), name));
                                     ui.close();
                                 }
-                                ui.menu_button("Delete folder", |ui| {
-                                    ui.label(RichText::new("Its playlists move to the top level.").color(SECONDARY));
-                                    if ui.button(RichText::new("Delete").color(DANGER)).clicked() {
-                                        actions.push(Action::DeleteFolder(id.clone()));
-                                        ui.close();
-                                    }
-                                });
+                                if ui.button(RichText::new("Delete folder").color(DANGER)).clicked() {
+                                    let then = Action::DeleteFolder(id.clone());
+                                    actions.push(Action::Confirm(Box::new(Confirm::new(format!("Delete {text}?"), "The folder goes; the playlists in it move to the top level.", then))));
+                                    ui.close();
+                                }
                             });
                         }
                         Card::Playlist(p) => {
@@ -1481,6 +1491,14 @@ impl eframe::App for App {
             self.content(ui, &mut actions);
         }
         self.drag_label(ui.ctx());
+        if let Some(confirm) = &self.confirm
+            && let Some(yes) = crate::widgets::confirm_dialog(ui.ctx(), confirm)
+        {
+            let confirm = self.confirm.take().expect("dialog is open");
+            if yes {
+                actions.push(confirm.then);
+            }
+        }
         if let Some((title, credits)) = &self.credits
             && crate::widgets::credits_dialog(ui.ctx(), title, credits)
         {

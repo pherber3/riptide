@@ -331,13 +331,11 @@ pub fn playlist_actions(ui: &mut Ui, id: &str, title: &str, folders: &[Card], ac
                 }
             }
         });
-        ui.menu_button("Delete playlist", |ui| {
-            ui.label(RichText::new("This can't be undone.").color(SECONDARY));
-            if ui.button(RichText::new("Delete").color(DANGER)).clicked() {
-                actions.push(Action::DeletePlaylist(id.into()));
-                ui.close();
-            }
-        });
+        if ui.button(RichText::new("Delete playlist").color(DANGER)).clicked() {
+            let text = "This deletes the playlist from your Tidal account. It can't be undone.";
+            actions.push(Action::Confirm(Box::new(Confirm::new(format!("Delete {title}?"), text, Action::DeletePlaylist(id.into())))));
+            ui.close();
+        }
     }
 }
 
@@ -441,7 +439,17 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
         Body::Tracks { tracks, album_column } => {
             let sorted = view.as_ref().map(|v| (v.sort, v.reverse));
             if let Some(view) = view {
-                filter_box(ui, view);
+                ui.horizontal(|ui| {
+                    filter_box(ui, view);
+                    // A sorted list says how to get back to its own order (a playlist's can be dragged).
+                    if view.sort != Sort::Added || view.reverse {
+                        let own = if view.key == "playlist" { "Playlist order" } else { "Recently added" };
+                        ui.add_space(8.0);
+                        if link_text(ui, RichText::new(format!("Back to {}", own.to_lowercase())).color(SECONDARY)).on_hover_text(own).clicked() {
+                            actions.push(Action::ResetSort);
+                        }
+                    }
+                });
                 ui.add_space(12.0);
                 order = Some(view.rows(tracks));
             }
@@ -549,6 +557,47 @@ fn about(ui: &mut Ui, text: &str) {
     });
     if cut.is_some() && link_text(ui, RichText::new("Read more").font(semibold(13.0)).color(TEXT)).clicked() {
         ui.data_mut(|d| d.insert_temp(id, true));
+    }
+}
+
+/// A question to confirm before something that can't be undone.
+pub struct Confirm {
+    pub title: String,
+    pub text: &'static str,
+    pub then: Action,
+}
+
+impl Confirm {
+    pub fn new(title: String, text: &'static str, then: Action) -> Self {
+        Self { title, text, then }
+    }
+}
+
+/// "Are you sure?": Some(true) to go ahead, Some(false) to cancel.
+pub fn confirm_dialog(ctx: &egui::Context, confirm: &Confirm) -> Option<bool> {
+    let frame = egui::Frame::new().fill(SURFACE).corner_radius(14).inner_margin(24);
+    let modal = egui::Modal::new(egui::Id::new("confirm")).frame(frame).show(ctx, |ui| {
+        ui.set_width(400.0);
+        ui.add(egui::Label::new(RichText::new(&confirm.title).font(bold(20.0)).color(TEXT)).wrap());
+        ui.add_space(8.0);
+        ui.label(RichText::new(confirm.text).size(14.0).color(SECONDARY));
+        ui.add_space(20.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let delete = egui::Button::new(RichText::new("Delete").font(semibold(14.0)).color(Color32::WHITE)).fill(DANGER).corner_radius(20).min_size(vec2(88.0, 38.0));
+            let yes = ui.add(delete).clicked();
+            let cancel = egui::Button::new(RichText::new("Cancel").font(semibold(14.0)).color(TEXT)).fill(HOVER).corner_radius(20).min_size(vec2(88.0, 38.0));
+            let no = ui.add(cancel).clicked();
+            (yes, no)
+        })
+        .inner
+    });
+    let (yes, no) = modal.inner;
+    if yes {
+        Some(true)
+    } else if no || modal.should_close() {
+        Some(false)
+    } else {
+        None
     }
 }
 
