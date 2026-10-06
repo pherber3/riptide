@@ -32,7 +32,10 @@ pub fn art(id: Option<&str>, size: u32) -> Option<String> {
 
 pub fn clock(seconds: f64) -> String {
     let s = seconds as u64;
-    format!("{}:{:02}", s / 60, s % 60)
+    match s / 3600 {
+        0 => format!("{}:{:02}", s / 60, s % 60),
+        h => format!("{h}:{:02}:{:02}", s / 60 % 60, s % 60),
+    }
 }
 
 pub fn section(ui: &mut Ui, title: &str) {
@@ -292,8 +295,9 @@ pub enum Start {
     Radio,
 }
 
-/// The page title, with big artwork when it has some, and Play / Shuffle (/ Radio) buttons.
-fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: &mut Vec<Action>) -> Option<Start> {
+/// A page's header, as in Tidal: the artwork with the title, a line about it and the length beside
+/// it, and the buttons in a row underneath.
+fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, library: &Library, actions: &mut Vec<Action>) -> Option<Start> {
     let mut start = None;
     let mut buttons = |ui: &mut Ui| {
         ui.horizontal(|ui| {
@@ -340,20 +344,33 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, library: &Library, actions: 
     ui.add_space(12.0);
     match &head.art {
         Some((image, round)) => {
-            let side = 232.0;
+            let side = 256.0;
             ui.horizontal(|ui| {
                 picture(ui, image.clone(), side, *round);
-                ui.add_space(20.0);
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), side), Layout::bottom_up(Align::Min), |ui| {
-                    buttons(ui);
-                    ui.add_space(12.0);
-                    if !head.subtitle.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(&head.subtitle).size(15.0).color(p().secondary)).truncate());
+                ui.add_space(32.0);
+                // The lines are laid out first so the block can sit centred beside the artwork.
+                let width = ui.available_width();
+                let lines: Vec<_> = [
+                    Some(RichText::new(&head.title).font(bold(40.0)).color(p().text)),
+                    (!head.subtitle.is_empty()).then(|| RichText::new(&head.subtitle).size(15.0).color(p().secondary)),
+                    length.map(|length| RichText::new(length).font(semibold(12.0)).color(p().secondary)),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|text| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), width, egui::TextStyle::Body))
+                .collect();
+                let gap = 8.0;
+                let height = lines.iter().map(|line| line.size().y + gap).sum::<f32>() - gap;
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = gap;
+                    ui.add_space(((side - height) / 2.0).max(0.0));
+                    for line in lines {
+                        ui.label(line);
                     }
-                    ui.add(egui::Label::new(RichText::new(&head.title).font(bold(40.0)).color(p().text)).truncate());
-                    ui.label(RichText::new(head.kind).font(semibold(12.0)).color(p().secondary));
                 });
             });
+            ui.add_space(24.0);
+            buttons(ui);
         }
         None => {
             ui.horizontal(|ui| {
@@ -425,7 +442,15 @@ fn filter_box(ui: &mut Ui, view: &mut View) {
 /// One page: header, then its track table, card grid or shelves.
 pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>) {
     let Page { head, body, view, .. } = page;
-    let start = head.as_ref().and_then(|head| header(ui, head, !body.tracks().is_empty(), rows.library, actions));
+    // A list of tracks says how many and how long, as "86 TRACKS (5:29:07)".
+    let length = match &*body {
+        Body::Tracks { tracks, .. } if !tracks.is_empty() => {
+            let seconds = tracks.iter().map(|t| f64::from(t.duration)).sum();
+            Some(format!("{} TRACK{} ({})", tracks.len(), if tracks.len() == 1 { "" } else { "S" }, clock(seconds)))
+        }
+        _ => None,
+    };
+    let start = head.as_ref().and_then(|head| header(ui, head, !body.tracks().is_empty(), length, rows.library, actions));
     let mut order = None;
     match body {
         Body::Tracks { tracks, album_column } => {
