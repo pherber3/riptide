@@ -665,6 +665,9 @@ impl App {
                 cols[0].horizontal_centered(|ui| {
                     if let Some(t) = track {
                         let cover = picture(ui, art(t.cover.as_deref(), 160), 60.0, false);
+                        if cover.hovered() {
+                            ui.painter().rect_filled(cover.rect, 4.0, Color32::from_black_alpha(90));
+                        }
                         if let Some(id) = t.album_id
                             && cover.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
                         {
@@ -674,10 +677,8 @@ impl App {
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 heart(ui, t.id, &self.favorites, actions);
-                                let title = egui::Label::new(RichText::new(&t.title).strong()).truncate().sense(Sense::click());
-                                let title = ui.add(title).on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if let Some(id) = t.album_id
-                                    && title.on_hover_text(&t.album).clicked()
+                                    && link_text(ui, RichText::new(&t.title).strong()).clicked()
                                 {
                                     actions.push(Action::Album(id));
                                 }
@@ -1254,6 +1255,16 @@ fn art(id: Option<&str>, size: u32) -> Option<String> {
 }
 
 /// Artwork, loaded only once it scrolls into view so long shelves and grids don't fill memory.
+/// Text that underlines on hover and clicks like a link, truncated to fit.
+fn link_text(ui: &mut Ui, text: RichText) -> egui::Response {
+    let response = ui.add(egui::Label::new(text).truncate().selectable(false).sense(Sense::click()));
+    if response.hovered() {
+        let stroke = egui::Stroke::new(1.0, ui.visuals().strong_text_color());
+        ui.painter().hline(response.rect.x_range(), response.rect.bottom() - 1.0, stroke);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn picture(ui: &mut Ui, url: Option<String>, side: f32, round: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     paint_picture(ui, url, rect, round);
