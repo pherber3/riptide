@@ -42,6 +42,7 @@ pub enum Source {
     Artists,
     TrackRadio(u64),
     ArtistRadio(u64),
+    Settings,
 }
 
 impl Source {
@@ -100,6 +101,8 @@ pub enum Body {
     Tracks { tracks: Vec<Track>, album_column: bool },
     Grid { cards: Vec<Card>, sorts: &'static [Sort] },
     Shelves(Vec<Shelf>),
+    /// Drawn by the app from its own state rather than loaded.
+    Settings,
 }
 
 impl Body {
@@ -108,7 +111,7 @@ impl Body {
         match self {
             Self::Tracks { tracks, .. } => tracks,
             Self::Shelves(shelves) => shelves.iter().find(|s| !s.tracks.is_empty()).map_or(&[], |s| &s.tracks),
-            Self::Grid { .. } => &[],
+            Self::Grid { .. } | Self::Settings => &[],
         }
     }
 }
@@ -163,6 +166,7 @@ async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             (Head::title("Artists"), Body::Grid { cards, sorts: NAME_SORTS })
         }
         Source::Folder(id, name) => (Head::title(name.clone()), Body::Grid { cards: tidal.folder(id).await?, sorts: NAME_SORTS }),
+        Source::Settings => (Head::title("Settings"), Body::Settings),
         Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.radio("tracks", *id).await?, true)),
         Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.radio("artists", *id).await?, true)),
     };
@@ -960,8 +964,9 @@ impl App {
                     actions.push(Action::Open(Source::Search(self.query.trim().into())));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let gear = egui::Button::image(Icon::Settings.image(SECONDARY, 20.0)).frame(false);
-                    egui::containers::menu::MenuButton::from_button(gear).ui(ui, |ui| settings(ui, quality, lastfm_user.as_deref(), actions));
+                    if icon_button(ui, Icon::Settings, 20.0, SECONDARY).on_hover_text("Settings").clicked() {
+                        actions.push(Action::Open(Source::Settings));
+                    }
                     ui.add_space(8.0);
                     if self.loading {
                         ui.spinner();
@@ -976,7 +981,14 @@ impl App {
             });
             ui.add_space(4.0);
             if let Some(page) = &mut self.page {
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::widgets::page(ui, page, &rows, actions));
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    crate::widgets::page(ui, page, &rows, actions);
+                    if matches!(page.body, Body::Settings) {
+                        let data = self.session.parent().and_then(Path::parent).unwrap_or(Path::new("."));
+                        let state = crate::settings::State { quality, lastfm_user: lastfm_user.as_deref(), data };
+                        crate::settings::page(ui, &state, actions);
+                    }
+                });
             }
         });
     }
@@ -1045,31 +1057,6 @@ impl eframe::App for App {
 }
 
 /// The settings menu behind the gear at the top right.
-fn settings(ui: &mut Ui, quality: Quality, lastfm_user: Option<&str>, actions: &mut Vec<Action>) {
-    ui.set_min_width(240.0);
-    ui.spacing_mut().button_padding = vec2(12.0, 7.0);
-    let heading = |ui: &mut Ui, text: &str| ui.label(RichText::new(text).font(semibold(11.0)).color(DIM));
-    heading(ui, "STREAMING QUALITY");
-    quality_choices(ui, quality, actions);
-    ui.separator();
-    heading(ui, "LAST.FM");
-    match lastfm_user {
-        Some(user) => {
-            ui.label(format!("Scrobbling as {user}"));
-            if ui.button("Disconnect").clicked() {
-                actions.push(Action::DisconnectLastFm);
-                ui.close();
-            }
-        }
-        None => {
-            if ui.button("Connect Last.fm").clicked() {
-                actions.push(Action::ConnectLastFm);
-                ui.close();
-            }
-        }
-    }
-}
-
 fn quality_choices(ui: &mut Ui, current: Quality, actions: &mut Vec<Action>) {
     for q in Quality::ALL {
         if ui.radio(current == q, RichText::new(q.name()).color(tier_color(q))).clicked() {

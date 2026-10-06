@@ -8,6 +8,7 @@ mod fonts;
 mod lastfm;
 mod player;
 mod queue;
+mod settings;
 mod theme;
 mod tidal;
 mod view;

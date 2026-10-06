@@ -308,6 +308,7 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
             });
             order = None;
         }
+        Body::Settings => {}
         Body::Shelves(shelves) => {
             for (n, shelf) in shelves.iter().enumerate() {
                 section(ui, &shelf.title);
