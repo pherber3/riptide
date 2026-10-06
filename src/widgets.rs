@@ -207,6 +207,8 @@ impl Tide {
             let (long, short) = (turn(1.0), turn(-1.4));
             let (crest, deep) = (Color32::from_white_alpha(alpha), Color32::from_white_alpha(alpha / 4));
             let mut water = egui::Mesh::default();
+            water.reserve_vertices(2 * STEPS as usize + 2);
+            water.reserve_triangles(2 * STEPS as usize);
             for i in 0..=STEPS {
                 let x = rect.left() + rect.width() * i as f32 / STEPS as f32;
                 let u = k * (x - rect.left());
@@ -390,13 +392,30 @@ pub fn playlist_actions(ui: &mut Ui, id: &str, title: &str, folders: &[Card], ac
 }
 
 /// An on/off switch.
-pub fn switch(ui: &mut Ui, on: bool) -> egui::Response {
+pub fn switch(ui: &mut Ui, on: &mut bool) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
-    let t = ui.ctx().animate_bool(response.id, on);
+    if clickable(response.clone()).clicked() {
+        *on = !*on;
+    }
+    let t = ui.ctx().animate_bool(response.id, *on);
     ui.painter().rect_filled(rect, 11.0, p().surface_hover.lerp_to_gamma(p().accent, t));
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
     ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, p().text);
-    clickable(response)
+}
+
+/// A setting: its name and a line about it on the left, its control on the right.
+pub fn setting(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
+    // The words make room for the control: they wrap rather than run under it.
+    egui::Sides::new().shrink_left().show(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).font(medium(15.0)).color(p().text));
+                ui.label(RichText::new(detail).size(13.0).color(p().secondary));
+            });
+        },
+        control,
+    );
 }
 
 fn filter_box(ui: &mut Ui, view: &mut View) {
@@ -744,8 +763,9 @@ impl Rows<'_> {
     }
 }
 
-fn link_to(ui: &mut Ui, text: &str, to: Option<Source>, actions: &mut Vec<Action>) {
-    if link_text(ui, RichText::new(text).color(p().secondary)).clicked()
+/// Secondary text that opens a page, when it has one.
+pub fn link_to(ui: &mut Ui, text: impl Into<RichText>, to: Option<Source>, actions: &mut Vec<Action>) {
+    if link_text(ui, text.into().color(p().secondary)).clicked()
         && let Some(source) = to
     {
         actions.push(Action::Open(source));

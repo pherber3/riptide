@@ -2,7 +2,7 @@ use egui::{Color32, Context, RichText, Ui, vec2};
 
 use crate::app::Action;
 use crate::theme::{p, Icon, bold, medium, semibold};
-use crate::widgets::{icon_button, switch};
+use crate::widgets::{icon_button, setting, switch};
 
 /// The one dialog that can be open at a time.
 pub enum Dialog {
@@ -93,20 +93,7 @@ fn playlist_form(ui: &mut Ui, form: &mut PlaylistForm) -> bool {
         ui.label(RichText::new(format!("{}/500 characters", form.description.chars().count())).size(12.0).color(p().dim));
         ui.add_space(12.0);
         egui::Frame::new().fill(p().surface_hover).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Make it public").font(semibold(15.0)).color(p().text));
-                        ui.label(RichText::new("Your playlist will be visible on your profile and to anyone.").size(13.0).color(p().secondary));
-                    });
-                },
-                |ui| {
-                    if switch(ui, form.public).clicked() {
-                        form.public = !form.public;
-                    }
-                },
-            );
+            setting(ui, "Make it public", "Your playlist will be visible on your profile and to anyone.", |ui| switch(ui, &mut form.public));
         });
     }
     ui.add_space(16.0);

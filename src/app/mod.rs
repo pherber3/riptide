@@ -537,7 +537,6 @@ impl eframe::App for App {
         // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
         let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
         let mood = cover.and_then(|url| crate::art::tint(&url));
-        let before = (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray, self.settings.tide);
         // The bar takes the tint too, where its text stays light on it.
         self.player_bar(ui, mood.filter(|_| theme::p().dark), &mut actions);
         if self.lyrics_open {
@@ -545,16 +544,17 @@ impl eframe::App for App {
         } else {
             self.sidebar(ui, &mut actions);
             self.queue_panel(ui, &mut actions);
+            // What the settings page changes takes effect, and is kept.
+            let before = self.page.as_ref().is_some_and(|p| p.source == Source::Settings).then(|| self.settings.clone());
             self.content(ui, &mut actions);
-        }
-        // What the settings page changed takes effect, and is kept.
-        if before != (self.settings.device.clone(), self.settings.theme.clone(), self.settings.normalize, self.settings.close_to_tray, self.settings.tide) {
-            if before.0 != self.settings.device {
-                self.player.send(Cmd::Device(self.settings.device.clone()));
+            if let Some(before) = before.filter(|before| *before != self.settings) {
+                if before.device != self.settings.device {
+                    self.player.send(Cmd::Device(self.settings.device.clone()));
+                }
+                self.apply_theme();
+                self.apply_gain();
+                self.settings.save(&self.data);
             }
-            self.apply_theme();
-            self.apply_gain();
-            self.settings.save(&self.data);
         }
         self.drag_label(&ctx);
         if let Some(dialog) = &mut self.dialog

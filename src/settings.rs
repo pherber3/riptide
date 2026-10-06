@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use fastframe_theme::Catalog;
 
 use crate::app::Action;
-use crate::theme::{Palette, bold, medium, p};
+use crate::theme::{Palette, bold, p};
 use crate::tidal::Quality;
 use crate::view::Sort;
-use crate::widgets::{section, switch, tier_color};
+use crate::widgets::{section, setting as row, switch, tier_color};
 
 /// What Riptide remembers between runs, besides the sign-in and the queue: `data/settings.json`.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -85,11 +85,7 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
             });
         });
         ui.separator();
-        row(ui, "Tide", "Waves along the bottom of the lyrics view that rise and roll with the music", |ui| {
-            if switch(ui, s.tide).clicked() {
-                s.tide = !s.tide;
-            }
-        });
+        row(ui, "Tide", "Waves along the bottom of the lyrics view that rise and roll with the music", |ui| switch(ui, &mut s.tide));
     });
     card(ui, "Playback", |ui| {
         let detail = match s.quality {
@@ -120,18 +116,10 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
             }
         });
         ui.separator();
-        row(ui, "Normalize volume", "Play every track at about the same loudness, as Tidal does", |ui| {
-            if switch(ui, s.normalize).clicked() {
-                s.normalize = !s.normalize;
-            }
-        });
+        row(ui, "Normalize volume", "Play every track at about the same loudness, as Tidal does", |ui| switch(ui, &mut s.normalize));
     });
     card(ui, "Window", |ui| {
-        row(ui, "Close to tray", "Closing the window keeps Riptide playing in the system tray", |ui| {
-            if switch(ui, s.close_to_tray).clicked() {
-                s.close_to_tray = !s.close_to_tray;
-            }
-        });
+        row(ui, "Close to tray", "Closing the window keeps Riptide playing in the system tray", |ui| switch(ui, &mut s.close_to_tray));
     });
     card(ui, "Connections", |ui| {
         let detail = lastfm_user.map_or("Scrobble what you play to your Last.fm profile".into(), |user| format!("Scrobbling as {user}"));
@@ -158,17 +146,3 @@ fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// A setting: its name and a line about it on the left, its control on the right.
-fn row(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
-    // The words make room for the control: they wrap rather than run under it.
-    egui::Sides::new().shrink_left().show(
-        ui,
-        |ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(title).font(medium(15.0)).color(p().text));
-                ui.label(RichText::new(detail).size(13.0).color(p().secondary));
-            });
-        },
-        control,
-    );
-}

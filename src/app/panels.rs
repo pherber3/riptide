@@ -7,7 +7,7 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
 use crate::tidal::{self, Card, Item, Quality};
-use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
+use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -173,11 +173,7 @@ impl App {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.add_space(if self.queue.from.is_some() { 14.0 } else { 23.0 });
                         album |= link_text(ui, RichText::new(&t.title).font(semibold(14.0)).color(p().text)).clicked();
-                        if link_text(ui, RichText::new(&t.artist).size(13.0).color(p().secondary)).clicked()
-                            && let Some(id) = t.artist_id
-                        {
-                            actions.push(Action::Open(Source::Artist(id)));
-                        }
+                        link_to(ui, RichText::new(&t.artist).size(13.0), t.artist_id.map(Source::Artist), actions);
                         // Where it is playing from, as in Tidal: a way back to that playlist or album.
                         if let Some((source, name)) = &self.queue.from {
                             ui.horizontal(|ui| {
@@ -188,9 +184,7 @@ impl App {
                                     _ => Icon::Playlists,
                                 };
                                 ui.add(icon.image(p().secondary, 13.0));
-                                if link_text(ui, RichText::new(name).size(12.0).color(p().secondary)).clicked() {
-                                    actions.push(Action::Open(source.clone()));
-                                }
+                                link_to(ui, RichText::new(name).size(12.0), Some(source.clone()), actions);
                             });
                         }
                     });
@@ -350,34 +344,38 @@ impl App {
                     ui.add_space(top - lead);
                     scroll.max_height(column + 2.0 * lead).show(ui, |ui| {
                         let from = ui.clip_rect().top() + lead;
-                        let shown = |ui: &Ui, color: Color32| {
-                            let y = ui.cursor().top() + 20.0;
-                            let below = (from + column - y) / (column * 0.22);
-                            let f = (1.0 - (from - y).max(0.0) / FADE).min(below).clamp(0.0, 1.0);
-                            color.gamma_multiply(f * f * (3.0 - 2.0 * f))
+                        // Laid out without a colour and painted in the one for where it lands, so the
+                        // fade never re-shapes the text.
+                        let lyric = |ui: &mut Ui, text: RichText, color: Color32| {
+                            let galley = egui::WidgetText::from(text.color(Color32::PLACEHOLDER)).into_galley(ui, Some(egui::TextWrapMode::Wrap), ui.available_width(), egui::TextStyle::Body);
+                            let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                let y = rect.center().y;
+                                let f = (1.0 - (from - y).max(0.0) / FADE).min((from + column - y) / (column * 0.22)).clamp(0.0, 1.0);
+                                ui.painter().galley(rect.min, galley, color.gamma_multiply(f * f * (3.0 - 2.0 * f)));
+                            }
+                            response
                         };
                         ui.add_space(lead);
-                        let line = |text: &str, color| RichText::new(text).font(bold(34.0)).color(color);
                         match lyrics {
                             None => {
                                 ui.spinner();
                             }
                             Some(l) if l.synced.is_empty() && l.text.is_empty() => {
-                                ui.label(line("No lyrics for this track.", soft));
+                                ui.label(RichText::new("No lyrics for this track.").font(bold(34.0)).color(soft));
                             }
                             Some(l) if l.synced.is_empty() => {
                                 for words in l.text.lines() {
-                                    let color = shown(ui, Color32::WHITE);
-                                    ui.label(RichText::new(words).font(semibold(24.0)).color(color));
+                                    lyric(ui, RichText::new(words).font(semibold(24.0)), Color32::WHITE);
                                 }
                             }
                             Some(l) => {
                                 let position = self.player.status.position();
                                 let now = l.synced.iter().rposition(|(at, _)| *at <= position);
                                 for (n, (at, words)) in l.synced.iter().enumerate() {
-                                    let color = shown(ui, if Some(n) == now { Color32::WHITE } else { faint });
+                                    let color = if Some(n) == now { Color32::WHITE } else { faint };
                                     let words = if words.is_empty() { "♪" } else { words };
-                                    let response = ui.add(egui::Label::new(line(words, color)).selectable(false).sense(Sense::click()));
+                                    let response = lyric(ui, RichText::new(words).font(bold(34.0)), color);
                                     if Some(n) == now && self.lyric_line != now {
                                         response.scroll_to_me(Some(Align::Center));
                                     }
