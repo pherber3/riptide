@@ -301,7 +301,7 @@ impl App {
             Action::Sort(sort) => {
                 let view = &mut self.view;
                 view.reverse = view.sort == sort && !view.reverse;
-                (view.sort, view.rows) = (sort, None);
+                (view.sort, view.stale) = (sort, true);
             }
             // Back to the last search results rather than searching again.
             Action::SearchPage if !matches!(self.page, Page::Search(_)) => {
@@ -607,7 +607,7 @@ impl App {
     }
 
     fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        if self.view.rows.is_none() {
+        if self.view.rows.is_none() || self.view.stale {
             let rows = match &self.page {
                 Page::Tracks(tracks) | Page::Playlist(_, tracks) => arrange(tracks, &self.view),
                 Page::Albums(albums) => arrange(albums, &self.view),
@@ -615,7 +615,7 @@ impl App {
                 Page::Playlists(playlists) => arrange(playlists, &self.view),
                 _ => Vec::new(),
             };
-            self.view.rows = Some(rows);
+            (self.view.rows, self.view.stale) = (Some(rows), false);
         }
         let sorted = Some((self.view.sort, self.view.reverse));
         let (playing, favorites) = (self.current().map(|t| t.id), &self.favorites);
@@ -751,7 +751,7 @@ impl Sort {
 fn filter_box(ui: &mut Ui, view: &mut View, hint: &str) {
     let filter = egui::TextEdit::singleline(&mut view.filter).hint_text(hint).desired_width(f32::INFINITY);
     if ui.add(filter).changed() {
-        view.rows = None;
+        view.stale = true;
         ui.ctx().request_repaint();
     }
     ui.add_space(8.0);
@@ -772,7 +772,7 @@ fn grid_controls(ui: &mut Ui, title: &str, view: &mut View, sorts: &[Sort], acti
             });
             let filter = egui::TextEdit::singleline(&mut view.filter).hint_text("Filter").desired_width(220.0);
             if ui.add(filter).changed() {
-                view.rows = None;
+                view.stale = true;
                 ui.ctx().request_repaint();
             }
         });
@@ -786,6 +786,8 @@ struct View {
     sort: Sort,
     reverse: bool,
     rows: Option<Vec<usize>>,
+    /// The filter or sort changed; `rows` still holds the old order until recomputed.
+    stale: bool,
 }
 
 trait Sortable {
@@ -1078,22 +1080,38 @@ impl Rows<'_> {
             cell(ui, TIME, |ui| column_header(ui, "TIME", Sort::Duration, sorted, actions));
         });
         ui.separator();
+        let full = ui.available_width();
         for (pos, t) in ordered(tracks, order).enumerate() {
+            let row = Rect::from_min_size(ui.cursor().min, vec2(full, ROW));
             // Rows scrolled out of view only take up space, so long playlists stay cheap to draw.
-            if !ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(free, ROW))) {
+            if !ui.is_rect_visible(row) {
                 ui.allocate_space(vec2(free, ROW));
                 continue;
             }
             let i = order.map_or(pos, |o| o[pos]);
+            let play = || if self.queue { Action::Jump(i) } else { Action::Play(in_order(tracks, order), pos) };
+            let hovered = ui.rect_contains_pointer(row);
+            if hovered {
+                ui.painter().rect_filled(row.expand2(vec2(4.0, 2.0)), 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            }
             ui.horizontal(|ui| {
                 let color = if self.playing == Some(t.id) { ACCENT } else { ui.visuals().strong_text_color() };
                 cell(ui, NUMBER, |ui| {
-                    ui.label(RichText::new((pos + 1).to_string()).weak());
+                    if hovered {
+                        let (rect, button) = ui.allocate_exact_size(vec2(ROW, ROW), Sense::click());
+                        let fill = if button.hovered() { ACCENT } else { ui.visuals().strong_text_color() };
+                        triangle(ui, rect.center(), 6.0, Direction::Right, fill);
+                        if button.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            actions.push(play());
+                        }
+                    } else {
+                        ui.label(RichText::new((pos + 1).to_string()).weak());
+                    }
                 });
                 cell(ui, width(0.4), |ui| {
                     let title = ui.add(egui::Label::new(RichText::new(&t.title).color(color)).truncate().sense(Sense::click()));
                     if title.clicked() {
-                        actions.push(if self.queue { Action::Jump(i) } else { Action::Play(in_order(tracks, order), pos) });
+                        actions.push(play());
                     }
                     title.context_menu(|ui| self.menu(ui, tracks, i, actions));
                 });
@@ -1166,13 +1184,31 @@ fn column_header(ui: &mut Ui, name: &str, sort: Sort, sorted: Option<(Sort, bool
     let active = current == sort;
     let text = RichText::new(name).small();
     let text = if active { text.color(ACCENT) } else { text.weak() };
-    if ui.add(egui::Label::new(text).sense(Sense::click())).clicked() {
+    let header = ui.horizontal(|ui| {
+        ui.label(text);
+        if active {
+            let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            triangle(ui, rect.center(), 4.0, if reverse { Direction::Up } else { Direction::Down }, ACCENT);
+        }
+    });
+    let click = ui.interact(header.response.rect, ui.id().with(name), Sense::click());
+    if click.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         actions.push(Action::Sort(sort));
     }
-    if active {
-        let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-        let (c, flip) = (rect.center(), if reverse { -1.0 } else { 1.0 });
-        let points = vec![c + vec2(-4.0, -2.0 * flip), c + vec2(4.0, -2.0 * flip), c + vec2(0.0, 3.0 * flip)];
-        ui.painter().add(egui::Shape::convex_polygon(points, ACCENT, egui::Stroke::NONE));
-    }
+}
+
+enum Direction {
+    Up,
+    Down,
+    Right,
+}
+
+/// A filled triangle pointing `direction`, drawn rather than typed so it never depends on font coverage.
+fn triangle(ui: &Ui, c: egui::Pos2, size: f32, direction: Direction, fill: Color32) {
+    let points = match direction {
+        Direction::Down => vec![c + vec2(-size, -size / 2.0), c + vec2(size, -size / 2.0), c + vec2(0.0, size * 0.75)],
+        Direction::Up => vec![c + vec2(-size, size / 2.0), c + vec2(size, size / 2.0), c + vec2(0.0, -size * 0.75)],
+        Direction::Right => vec![c + vec2(-size * 0.6, -size), c + vec2(-size * 0.6, size), c + vec2(size, 0.0)],
+    };
+    ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::NONE));
 }
