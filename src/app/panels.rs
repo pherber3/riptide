@@ -336,15 +336,14 @@ impl App {
                 ui.add_space(64.0);
                 let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
                 let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-                // The lyrics stay beside the cover and its title, the playing line level with their middle.
-                let column = side + 70.0;
+                // The lyrics stay beside the cover, top to bottom, the playing line level with its middle.
                 ui.vertical(|ui| {
                     ui.add_space(top);
-                    scroll.max_height(column).show(ui, |ui| {
+                    scroll.max_height(side).show(ui, |ui| {
                         let from = ui.clip_rect().top();
                         // The same fade at both ends; the top one slides in as the lyrics scroll, so
                         // the first line starts in full beside the cover's top.
-                        let fade = column * 0.22;
+                        let fade = side * 0.22;
                         let unscrolled = (fade - (from - ui.cursor().top())).max(0.0);
                         // Laid out without a colour and painted in the one for where it lands, so the
                         // fade never re-shapes the text.
@@ -353,7 +352,7 @@ impl App {
                             let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
                             if ui.is_rect_visible(rect) {
                                 let y = rect.center().y;
-                                let f = ((y - from + unscrolled) / fade).min((from + column - y) / fade).clamp(0.0, 1.0);
+                                let f = ((y - from + unscrolled) / fade).min((from + side - y) / fade).clamp(0.0, 1.0);
                                 ui.painter().galley(rect.min, galley, color.gamma_multiply(f * f * (3.0 - 2.0 * f)));
                             }
                             response
@@ -388,7 +387,7 @@ impl App {
                                 self.lyric_line = now;
                             }
                         }
-                        ui.add_space(column / 2.0);
+                        ui.add_space(side / 2.0);
                     })
                 });
             });
