@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
@@ -25,6 +26,24 @@ const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
 const SEARCH_PAUSE: f64 = 0.25;
 pub const ROOT: &str = "root";
+
+/// A later launch asked for the window (see `main`), and the context to wake for it.
+static SURFACE: AtomicBool = AtomicBool::new(false);
+static CONTEXT: OnceLock<egui::Context> = OnceLock::new();
+
+/// Answers a later launch: bring this copy's window up.
+pub fn surface_request(request: &str) -> Option<String> {
+    (request == "show").then(|| {
+        SURFACE.store(true, Relaxed);
+        CONTEXT.get().map(egui::Context::request_repaint);
+        "ok".into()
+    })
+}
+
+fn tray_icon(size: usize) -> Vec<u8> {
+    let image = image::load_from_memory(include_bytes!("../assets/riptide.png")).expect("bundled icon");
+    image.resize_exact(size as u32, size as u32, image::imageops::FilterType::Lanczos3).to_rgba8().into_raw()
+}
 const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
 const NAME_SORTS: &[Sort] = &[Sort::Added, Sort::Title];
 
@@ -228,6 +247,7 @@ pub enum Action {
     /// Open the playlist dialog for this, with this title filled in.
     PlaylistForm(Target, String),
     ConnectLastFm,
+    CloseToTray(bool),
     /// Show a track's credits (id and title).
     Credits(u64, String),
     CopyLink(String),
@@ -322,6 +342,11 @@ pub struct App {
     /// it is maximized.
     window: Option<egui::Rect>,
     maximized: bool,
+    tray: Option<fastframe_tray::Tray>,
+    /// Whether closing the window hides it in the tray rather than quitting.
+    close_to_tray: bool,
+    hidden: bool,
+    quitting: bool,
     /// The output device by name, or the system default.
     device: Option<String>,
     /// Scale each track to Tidal's reference loudness.
@@ -348,7 +373,26 @@ impl App {
         ctx.add_image_loader(Arc::new(Art::new(cache.join("art"), rt.handle().clone())));
         let (tx, rx) = channel();
         let session = tidal::session_path(dir);
-        let Saved { quality, volume, sorts, device, normalize } = load_settings(&session);
+        let Saved { quality, volume, sorts, device, normalize, close_to_tray } = load_settings(&session);
+        let _ = CONTEXT.set(ctx.clone());
+        let tray = fastframe_tray::Tray::spawn(
+            fastframe_tray::Config {
+                id: "riptide",
+                title: "Riptide".into(),
+                icon: tray_icon,
+                template_icon: None,
+                themed_icon: false,
+                menu_on_click: false,
+                menu: [("show", "Show Riptide"), ("play", "Play / Pause"), ("next", "Next"), ("previous", "Previous"), ("quit", "Quit")]
+                    .into_iter()
+                    .map(|(id, label)| fastframe_tray::MenuItem::action(id, label))
+                    .collect(),
+            },
+            {
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            },
+        );
         let player = Player::start(device.clone(), {
             let (tx, ctx) = (tx.clone(), ctx.clone());
             move |event| {
@@ -390,6 +434,10 @@ impl App {
             maximized,
             device,
             normalize,
+            tray,
+            close_to_tray,
+            hidden: false,
+            quitting: false,
             favorites: HashSet::new(),
             saved: HashSet::new(),
             folders: Vec::new(),
@@ -432,7 +480,7 @@ impl App {
 
     fn save_settings(&self) {
         let mut text = format!("quality={}\nvolume={}\nmaximized={}\n", self.quality.name(), self.volume, self.maximized);
-        text += &format!("normalize={}\n", self.normalize);
+        text += &format!("normalize={}\nclose_to_tray={}\n", self.normalize, self.close_to_tray);
         if let Some(device) = &self.device {
             text += &format!("device={device}\n");
         }
@@ -540,6 +588,49 @@ impl App {
         }
     }
 
+    /// What reopening restores: settings, window, queue and position.
+    fn save_state(&self) {
+        self.save_settings();
+        self.queue.save(&queue_path(&self.session), self.restored.unwrap_or_else(|| self.player.status.position()));
+    }
+
+    /// The tray's menu, a later launch asking for the window, and closing the window (which hides
+    /// it in the tray instead, when that is turned on).
+    fn window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        use egui::ViewportCommand as Command;
+        let mut show = SURFACE.swap(false, Relaxed);
+        let mut hide = false;
+        for event in self.tray.as_ref().map(fastframe_tray::Tray::events).unwrap_or_default() {
+            match event {
+                fastframe_tray::Event::Show => show = true,
+                fastframe_tray::Event::Toggle | fastframe_tray::Event::Menu("show") => (show, hide) = (self.hidden, !self.hidden),
+                fastframe_tray::Event::Menu("play") => actions.push(Action::Toggle),
+                fastframe_tray::Event::Menu("next") => actions.push(Action::Next),
+                fastframe_tray::Event::Menu("previous") => actions.push(Action::Prev),
+                fastframe_tray::Event::Menu("quit") => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(Command::Close);
+                }
+                fastframe_tray::Event::Menu(_) => {}
+            }
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.close_to_tray && !self.quitting && self.tray.is_some() {
+            ctx.send_viewport_cmd(Command::CancelClose);
+            hide = true;
+        }
+        if hide {
+            self.hidden = true;
+            self.save_state();
+            ctx.send_viewport_cmd(Command::Visible(false));
+        }
+        if show {
+            self.hidden = false;
+            for command in [Command::Visible(true), Command::Minimized(false), Command::Focus] {
+                ctx.send_viewport_cmd(command);
+            }
+        }
+    }
+
     /// The playing track's normalization, or none.
     fn apply_gain(&self) {
         let gain = self.queue.current().and_then(|t| t.gain).filter(|_| self.normalize);
@@ -632,6 +723,10 @@ impl App {
             Action::Device(device) => {
                 self.player.send(Cmd::Device(device.clone()));
                 self.device = device;
+                self.save_settings();
+            }
+            Action::CloseToTray(on) => {
+                self.close_to_tray = on;
                 self.save_settings();
             }
             Action::Normalize(on) => {
@@ -1195,7 +1290,7 @@ impl App {
             queue: false,
         };
         let (quality, lastfm_user) = (self.quality, self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.clone()));
-        let (device, normalize) = (self.device.clone(), self.normalize);
+        let (device, normalize, close_to_tray) = (self.device.clone(), self.normalize, self.close_to_tray);
         let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 14, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The page's artwork colour, glowing down from the top.
@@ -1241,7 +1336,7 @@ impl App {
                     crate::widgets::page(ui, page, &rows, actions);
                     if matches!(page.body, Body::Settings) {
                         let data = self.session.parent().and_then(Path::parent).unwrap_or(Path::new("."));
-                        let state = crate::settings::State { quality, device: device.as_deref(), normalize, lastfm_user: lastfm_user.as_deref(), data };
+                        let state = crate::settings::State { quality, device: device.as_deref(), normalize, close_to_tray, lastfm_user: lastfm_user.as_deref(), data };
                         crate::settings::page(ui, &state, actions);
                     }
                 });
@@ -1252,8 +1347,7 @@ impl App {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.save_settings();
-        self.queue.save(&queue_path(&self.session), self.restored.unwrap_or_else(|| self.player.status.position()));
+        self.save_state();
         if let Some(scrobble) = self.finish_listening() {
             let _ = self.rt.block_on(tokio::time::timeout(Duration::from_secs(3), scrobble));
         }
@@ -1287,6 +1381,7 @@ impl eframe::App for App {
             return self.login_ui(ui);
         }
         let mut actions = Vec::new();
+        self.window(&ui.ctx().clone(), &mut actions);
         let typing = ui.ctx().memory(|m| m.focused().is_some());
         ui.input(|i| {
             if i.key_pressed(Key::Space) && !typing {
@@ -1381,6 +1476,7 @@ fn settings_path(session: &Path) -> PathBuf {
 /// `key=value` lines: quality, volume and each page kind's sort (`sort.albums=Title reversed`).
 /// What `settings.txt` holds, besides the window.
 struct Saved {
+    close_to_tray: bool,
     quality: Quality,
     volume: f32,
     sorts: HashMap<String, (Sort, bool)>,
@@ -1390,13 +1486,14 @@ struct Saved {
 
 fn load_settings(session: &Path) -> Saved {
     let text = std::fs::read_to_string(settings_path(session)).unwrap_or_default();
-    let mut s = Saved { quality: Quality::Max, volume: 1.0, sorts: HashMap::new(), device: None, normalize: false };
+    let mut s = Saved { quality: Quality::Max, volume: 1.0, sorts: HashMap::new(), device: None, normalize: false, close_to_tray: false };
     for (key, value) in text.lines().filter_map(|l| l.split_once('=')) {
         match key {
             "quality" => s.quality = Quality::parse(value).unwrap_or(s.quality),
             "volume" => s.volume = value.parse().unwrap_or(s.volume),
             "device" => s.device = Some(value.into()),
             "normalize" => s.normalize = value == "true",
+            "close_to_tray" => s.close_to_tray = value == "true",
             _ => {
                 let (name, reversed) = value.split_once(' ').map_or((value, false), |(n, r)| (n, r == "reversed"));
                 if let (Some(page), Some(sort)) = (key.strip_prefix("sort."), Sort::ALL.into_iter().find(|s| format!("{s:?}") == name)) {

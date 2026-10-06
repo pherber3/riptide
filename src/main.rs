@@ -37,6 +37,12 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => {
+            // One copy at a time: launching again brings the running one's window up.
+            let slot = fastframe_instance::Slot::at(dir.join("data"), "riptide");
+            let _guard = match slot.claim("show", app::surface_request) {
+                fastframe_instance::Claim::First(guard) => guard,
+                _ => return Ok(()),
+            };
             let mut viewport = egui::ViewportBuilder::default()
                 .with_title("Riptide")
                 .with_icon(icon())

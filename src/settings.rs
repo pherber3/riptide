@@ -12,6 +12,7 @@ pub struct State<'a> {
     pub quality: Quality,
     pub device: Option<&'a str>,
     pub normalize: bool,
+    pub close_to_tray: bool,
     pub lastfm_user: Option<&'a str>,
     pub data: &'a Path,
 }
@@ -51,6 +52,13 @@ pub fn page(ui: &mut Ui, state: &State, actions: &mut Vec<Action>) {
         row(ui, "Normalize volume", "Play every track at about the same loudness, as Tidal does", |ui| {
             if switch(ui, state.normalize).clicked() {
                 actions.push(Action::Normalize(!state.normalize));
+            }
+        });
+    });
+    card(ui, "Window", |ui| {
+        row(ui, "Close to tray", "Closing the window keeps Riptide playing in the system tray", |ui| {
+            if switch(ui, state.close_to_tray).clicked() {
+                actions.push(Action::CloseToTray(!state.close_to_tray));
             }
         });
     });
