@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::Source;
 use crate::tidal::Track;
 
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -22,6 +23,9 @@ pub struct Queue {
     pub repeat: Repeat,
     /// The order before shuffling, while shuffle is on.
     unshuffled: Option<Vec<Track>>,
+    /// The page it was played from, and that page's title.
+    #[serde(default)]
+    pub from: Option<(Source, String)>,
 }
 
 impl Queue {
@@ -74,7 +78,7 @@ impl Queue {
     /// was playing, in which case it is now the whole queue, waiting to be played.
     pub fn enqueue(&mut self, track: Track, next: bool) -> bool {
         let Some(i) = self.index else {
-            (self.tracks, self.unshuffled) = (vec![track], None);
+            (self.tracks, self.unshuffled, self.from) = (vec![track], None, None);
             return false;
         };
         if let Some(order) = &mut self.unshuffled {

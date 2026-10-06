@@ -171,12 +171,27 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_max_width(ui.available_width() - 40.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.add_space(23.0);
+                        ui.add_space(if self.queue.from.is_some() { 14.0 } else { 23.0 });
                         album |= link_text(ui, RichText::new(&t.title).font(semibold(14.0)).color(p().text)).clicked();
                         if link_text(ui, RichText::new(&t.artist).size(13.0).color(p().secondary)).clicked()
                             && let Some(id) = t.artist_id
                         {
                             actions.push(Action::Open(Source::Artist(id)));
+                        }
+                        // Where it is playing from, as in Tidal: a way back to that playlist or album.
+                        if let Some((source, name)) = &self.queue.from {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                let icon = match source {
+                                    Source::Album(_) => Icon::Disc,
+                                    Source::Artist(_) | Source::ArtistRadio(_) => Icon::Artists,
+                                    _ => Icon::Playlists,
+                                };
+                                ui.add(icon.image(p().secondary, 13.0));
+                                if link_text(ui, RichText::new(name).size(12.0).color(p().secondary)).clicked() {
+                                    actions.push(Action::Open(source.clone()));
+                                }
+                            });
                         }
                     });
                     heart(ui, t.id, &self.library, true, actions);

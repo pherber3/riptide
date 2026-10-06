@@ -295,6 +295,15 @@ impl App {
         }
     }
 
+    /// Plays a new queue, remembering the page it came from.
+    fn start(&mut self, tracks: Vec<Track>, index: usize, shuffle: bool, from: Option<(Source, String)>) {
+        if !tracks.is_empty() {
+            let start = self.queue.replace(tracks, index, shuffle);
+            self.queue.from = from;
+            self.play(start);
+        }
+    }
+
     fn note(&mut self, notice: Option<String>) {
         if let Some(text) = notice {
             self.message = Some((text, false));
@@ -379,17 +388,17 @@ impl App {
                 });
             }
             Action::Play(source) => self.spawn(async move {
-                let tracks = load(tidal, source).await?.body.into_tracks();
+                let page = load(tidal, source).await?;
+                let from = page.origin();
+                let tracks = page.body.into_tracks();
                 Ok(then(move |app| match tracks.is_empty() {
                     true => app.fail("Nothing to play here.".into()),
-                    false => app.apply(Action::PlayTracks(tracks, 0, false)),
+                    false => app.start(tracks, 0, false, from),
                 }))
             }),
             Action::PlayTracks(tracks, index, shuffle) => {
-                if !tracks.is_empty() {
-                    let start = self.queue.replace(tracks, index, shuffle);
-                    self.play(start);
-                }
+                let from = self.page.as_ref().and_then(Page::origin);
+                self.start(tracks, index, shuffle, from);
             }
             Action::Enqueue(track, next) => {
                 if !self.queue.enqueue(track, next) {

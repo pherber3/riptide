@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use super::ROOT;
 use crate::tidal::{Card, Item, Mix, Shelf, Tidal, Track};
@@ -9,7 +10,7 @@ const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Yea
 const NAME_SORTS: &[Sort] = &[Sort::Added, Sort::Title];
 
 /// Tidal content the app can open as a page or play.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Source {
     Home,
     Search(String),
@@ -120,6 +121,14 @@ pub struct Page {
     pub body: Body,
     /// Filter and sort, on pages that have them.
     pub view: Option<View>,
+}
+
+impl Page {
+    /// What playing from this page shows it was played from: the page and its title.
+    pub fn origin(&self) -> Option<(Source, String)> {
+        let head = self.head.as_ref().filter(|_| !matches!(self.source, Source::Search(_)))?;
+        Some((self.source.clone(), head.title.clone()))
+    }
 }
 
 /// Loads any page. Playing a source loads its page too and plays the page's tracks.

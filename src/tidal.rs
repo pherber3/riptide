@@ -114,7 +114,7 @@ pub struct Lyrics {
 }
 
 /// A Tidal mix (a personal radio station); its artwork is a full URL.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mix {
     pub id: String,
     pub title: String,
