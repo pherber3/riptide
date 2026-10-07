@@ -131,6 +131,19 @@ pub enum Item {
     Playlist(String),
 }
 
+impl Item {
+    /// Its share link, as Tidal's own Share gives: a page that offers to open it in the app or in
+    /// the browser.
+    pub fn link(&self) -> String {
+        match self {
+            Self::Track(id) => format!("https://tidal.com/track/{id}/u"),
+            Self::Album(id) => format!("https://tidal.com/album/{id}/u"),
+            Self::Artist(id) => format!("https://tidal.com/artist/{id}/u"),
+            Self::Playlist(id) => format!("https://tidal.com/playlist/{id}/u"),
+        }
+    }
+}
+
 /// Anything shown as a card: in a grid, on a shelf, or in a playlist folder.
 #[derive(Clone, Debug)]
 pub enum Card {

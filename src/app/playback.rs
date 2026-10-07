@@ -135,7 +135,8 @@ impl App {
         }
     }
 
-    /// The system's media keys and overlay: commands in, what is playing out.
+    /// The system's media keys and overlay, commands in and what is playing out; and what is playing
+    /// on Discord.
     pub(super) fn media_keys(&mut self) {
         let playing = self.player.status.playing.load(Relaxed);
         for command in self.controls.commands() {
@@ -171,5 +172,7 @@ impl App {
             self.controls.update(np::State { playback, track, position, ..Default::default() });
             self.shown = shown;
         }
+        let started = tidal::now() as i64 - self.player.status.position().round() as i64;
+        self.discord.show(current.filter(|_| playing && self.settings.discord).map(|t| (t, started)));
     }
 }

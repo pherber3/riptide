@@ -314,7 +314,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
             if let Some(item) = &head.item
                 && icon_button(ui, Icon::Copy, 20.0, p().secondary).on_hover_text("Copy link").clicked()
             {
-                actions.push(Action::CopyLink(link(item)));
+                actions.push(Action::CopyLink(item.link()));
             }
             match &head.item {
                 Some(Item::Playlist(id)) if library.mine(id) => playlist_menu(ui, id, &head.title, &library.folders, actions),
@@ -582,15 +582,6 @@ fn about(ui: &mut Ui, text: &str) {
 }
 
 /// A Tidal web address for something, to share.
-pub fn link(item: &Item) -> String {
-    match item {
-        Item::Track(id) => format!("https://tidal.com/browse/track/{id}"),
-        Item::Album(id) => format!("https://tidal.com/browse/album/{id}"),
-        Item::Artist(id) => format!("https://tidal.com/browse/artist/{id}"),
-        Item::Playlist(id) => format!("https://tidal.com/browse/playlist/{id}"),
-    }
-}
-
 fn cell(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(vec2(width, height), Layout::left_to_right(Align::Center), |ui| {
         ui.set_width(width);
@@ -756,7 +747,7 @@ impl Rows<'_> {
         item(ui, actions, collection, Action::Save(Item::Track(t.id), !saved));
         item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
         item(ui, actions, "Credits", Action::Credits(t.id, t.title.clone()));
-        item(ui, actions, "Copy link", Action::CopyLink(link(&Item::Track(t.id))));
+        item(ui, actions, "Copy link", Action::CopyLink(Item::Track(t.id).link()));
         if let Some(id) = t.album_id {
             item(ui, actions, "Go to album", Action::Open(Source::Album(id)));
         }

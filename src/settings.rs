@@ -28,6 +28,8 @@ pub struct Settings {
     pub theme: Option<String>,
     /// Waves along the bottom of the lyrics view that move with the music.
     pub tide: bool,
+    /// Show what is playing on the user's Discord profile.
+    pub discord: bool,
     /// The window's outer position and inner size (x, y, width, height), while not maximized.
     pub window: Option<[f32; 4]>,
     pub maximized: bool,
@@ -37,7 +39,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, theme: None, tide: true, window: None, maximized: false, sorts: HashMap::new() }
+        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, theme: None, tide: true, discord: false, window: None, maximized: false, sorts: HashMap::new() }
     }
 }
 
@@ -128,6 +130,8 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
             None if ui.button("Connect").clicked() => actions.push(Action::ConnectLastFm),
             _ => {}
         });
+        ui.separator();
+        row(ui, "Discord", "Show what you're listening to on your Discord profile while the Discord app is open", |ui| switch(ui, &mut s.discord));
     });
     card(ui, "About", |ui| {
         row(ui, concat!("Riptide ", env!("CARGO_PKG_VERSION")), &format!("Settings, sign-in and cache live in {}", home.display()), |ui| {

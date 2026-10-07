@@ -5,6 +5,7 @@ mod art;
 mod cache;
 mod decode;
 mod dialogs;
+mod discord;
 mod fonts;
 mod lastfm;
 mod player;

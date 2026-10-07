@@ -138,6 +138,7 @@ pub struct App {
     quitting: bool,
     /// Scrobbling, when `data/lastfm.txt` has an API account.
     lastfm: Option<LastFm>,
+    discord: crate::discord::Discord,
     /// The palette files in `data/themes`, the shared ones among them.
     themes: fastframe_theme::Catalog<theme::Palette>,
 }
@@ -186,6 +187,7 @@ impl App {
             themes,
             busy: tidal::session_path(&data).exists(),
             lastfm: LastFm::load(LastFm::path(&data)),
+            discord: Default::default(),
             tray: window::tray(&ctx),
             rt,
             ctx,
