@@ -38,6 +38,8 @@ impl Discord {
         let activity = now.map_or(Value::Null, |(t, started)| {
             let mut activity = json!({
                 "type": 2,
+                // The member list's one line names the artist rather than Riptide.
+                "status_display_type": 1,
                 "details": t.title,
                 "state": t.artist,
                 "timestamps": { "start": started * 1000, "end": (started + i64::from(t.duration)) * 1000 },
