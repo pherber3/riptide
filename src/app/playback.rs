@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use fastframe_now_playing as np;
 
-use super::{Action, App, then};
+use super::{Action, App, Source, then};
 use crate::cache;
 use crate::decode::Decoder;
 use crate::lastfm;
@@ -108,11 +108,13 @@ impl App {
         self.player.send(Cmd::Stop);
     }
 
-    /// The next track, or radio from the last one when the queue runs out (autoplay).
+    /// The next track, or radio from the last one when the queue runs out (autoplay), unless the
+    /// queue was a radio already: that ends where it ends.
     pub(super) fn next(&mut self) {
+        let radio = matches!(self.queue.from, Some((Source::TrackRadio(_) | Source::ArtistRadio(_), _)));
         match (self.queue.after(), self.queue.current().map(|t| t.id), self.tidal.clone()) {
             (Some(i), ..) => self.play(i),
-            (None, Some(id), Some(tidal)) => self.spawn(async move {
+            (None, Some(id), Some(tidal)) if !radio => self.spawn(async move {
                 let radio = tidal.radio("tracks", id).await?;
                 Ok(then(move |app| {
                     if app.queue.current().is_some_and(|t| t.id == id) {
