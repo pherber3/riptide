@@ -582,8 +582,18 @@ fn cell(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui)) {
 pub struct Rows<'a> {
     pub playing: Option<u64>,
     pub library: &'a Library,
-    pub editing: Option<&'a str>,
-    pub queue: bool,
+    pub list: List<'a>,
+}
+
+/// What a track table lists, which decides what its rows can do.
+#[derive(Clone, Copy)]
+pub enum List<'a> {
+    /// The play queue: rows jump within it, and move or leave it.
+    Queue,
+    /// One of the user's own playlists, by id: rows can be dragged into place or removed.
+    Playlist(&'a str),
+    /// Any other tracks: playing one plays the list from there.
+    Tracks,
 }
 
 impl Rows<'_> {
@@ -595,7 +605,10 @@ impl Rows<'_> {
             ui.spacing_mut().item_spacing.y = 0.0;
             let height = if album { 52.0 } else { 40.0 };
             // The user's own playlist, in its own order and unfiltered, can be rearranged by dragging.
-            let reorder = self.editing.filter(|_| sorted == Some((Sort::Added, false)) && order.is_none_or(|o| o.len() == tracks.len()));
+            let reorder = match self.list {
+                List::Playlist(id) if sorted == Some((Sort::Added, false)) && order.is_none_or(|o| o.len() == tracks.len()) => Some(id),
+                _ => None,
+            };
             let added = tracks.first().is_some_and(|t| t.added.is_some());
             let columns = [(Sort::Title, "TITLE", 0.4, true), (Sort::Artist, "ARTIST", 0.25, true), (Sort::Album, "ALBUM", 0.22, album), (Sort::Added, "DATE ADDED", 0.13, added)];
             let columns: Vec<_> = columns.into_iter().filter(|c| c.3).collect();
@@ -623,7 +636,10 @@ impl Rows<'_> {
                     continue;
                 }
                 let i = order.map_or(pos, |o| o[pos]);
-                let play = || if self.queue { Action::Jump(i) } else { Action::PlayTracks(in_order(tracks, order), pos, false) };
+                let play = || match self.list {
+                    List::Queue => Action::Jump(i),
+                    _ => Action::PlayTracks(in_order(tracks, order), pos, false),
+                };
                 let row = ui.interact(rect, ui.id().with(("row", pos)), if reorder.is_some() { Sense::click_and_drag() } else { Sense::click() });
                 if let Some(playlist) = reorder {
                     self.drag_row(ui, row.clone(), rect, playlist, pos, actions);
@@ -710,7 +726,7 @@ impl Rows<'_> {
             });
         });
         ui.separator();
-        if self.queue {
+        if let List::Queue = self.list {
             if i > 0 {
                 menu_item(ui, actions, "Move up", Action::Move(i, i - 1));
             }
@@ -724,7 +740,7 @@ impl Rows<'_> {
             menu_item(ui, actions, "Play next", Action::Enqueue(t.clone(), true));
             menu_item(ui, actions, "Add to queue", Action::Enqueue(t.clone(), false));
         }
-        if let Some(playlist) = self.editing {
+        if let List::Playlist(playlist) = self.list {
             menu_item(ui, actions, "Remove from this playlist", Action::RemoveFromPlaylist(playlist.into(), i));
         }
         let config = egui::containers::menu::MenuConfig::new().close_behavior(KEEP_OPEN);

@@ -7,7 +7,7 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
 use crate::tidal::{self, Card, Item, Quality};
-use crate::widgets::{Rows, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
+use crate::widgets::{List, Rows, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -285,7 +285,7 @@ impl App {
         if !self.queue_open {
             return;
         }
-        let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, editing: None, queue: true };
+        let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list: List::Queue };
         let frame = egui::Frame::new().fill(p().panel).inner_margin(egui::Margin::symmetric(20, 0));
         egui::Panel::right("side").default_size(420.0).resizable(true).frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -449,7 +449,8 @@ impl App {
                 return;
             }
             let Some(page) = &mut self.page else { return };
-            let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, editing: editing.as_deref(), queue: false };
+            let list = editing.as_deref().map_or(List::Tracks, List::Playlist);
+            let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list };
             let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::widgets::page(ui, page, &rows, actions));
             if let Some(color) = tint {
                 let rect = egui::Rect::from_min_size(full.min - vec2(0.0, scrolled.state.offset.y), vec2(full.width(), 460.0));
