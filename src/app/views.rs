@@ -202,7 +202,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                         }
                         if let Some(Editions { this, explicit_varies, .. }) = &head.editions {
                             if this.atmos {
-                                ui.label(RichText::new("DOLBY ATMOS").font(semibold(12.0)).color(p().secondary));
+                                ui.label(RichText::new("DOLBY ATMOS (PLAYS IN STEREO)").font(semibold(12.0)).color(p().secondary));
                             } else {
                                 ui.add(tier_badge(this.quality).sense(Sense::hover()));
                             }

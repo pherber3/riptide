@@ -212,8 +212,14 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         },
         Source::Search(query) => (Head::title(format!("Results for “{query}”")), Body::Shelves(tidal.search(query).await?)),
         Source::Album(id) => {
-            let (album, editions, list) = tidal.album(*id).await?;
-            // Dolby Atmos editions play in stereo here, so they're not offered as a choice.
+            let (mut album, mut editions, mut list) = tidal.album(*id).await?;
+            // Riptide plays Dolby Atmos in stereo, so an Atmos edition (reached from one of its tracks)
+            // gives way to a stereo edition when there is one, and isn't offered as a choice.
+            if album.edition.atmos
+                && let Some(stereo) = editions.first().filter(|e| !e.edition.atmos).map(|e| e.id)
+            {
+                (album, editions, list) = tidal.album(stereo).await?;
+            }
             let explicit_varies = editions.iter().any(|e| e.edition.explicit) && editions.iter().any(|e| !e.edition.explicit);
             let others = editions.iter().filter(|e| e.id != album.id && !e.edition.atmos).map(|e| (e.edition, Source::Album(e.id))).collect();
             let editions = Some(Editions { this: album.edition, others, explicit_varies });
@@ -224,7 +230,7 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
                 None => (None, [album.artist, year].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")),
             };
             let art = Some((tidal::image(album.cover.as_deref(), 640), false));
-            (Some(Head { item: Some(Item::Album(*id)), title: album.title, by, editions, subtitle, art, ..Default::default() }), tracks(list, false))
+            (Some(Head { item: Some(Item::Album(album.id)), title: album.title, by, editions, subtitle, art, ..Default::default() }), tracks(list, false))
         }
         Source::Artist(id) => {
             let (artist, shelves) = tidal.artist(*id).await?;
