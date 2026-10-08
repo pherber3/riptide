@@ -6,6 +6,12 @@ use egui::{Align, Color32, Layout, Rect, Response, RichText, Sense, Stroke, Ui, 
 use crate::theme::{GOLD, Icon, TEAL, bold, medium, p, semibold};
 use crate::tidal::Quality;
 
+/// A tier's badge, as the player shows the quality playing: "MAX" in gold, "HIGH" in teal.
+pub fn tier_badge(quality: Quality) -> egui::Button<'static> {
+    let color = tier_color(quality);
+    egui::Button::new(RichText::new(quality.name().to_uppercase()).font(bold(11.0)).color(color)).fill(color.gamma_multiply(0.14)).corner_radius(4.0)
+}
+
 pub fn tier_color(quality: Quality) -> Color32 {
     match quality {
         Quality::Max => GOLD,

@@ -2,12 +2,15 @@
 
 use egui::{Align, Color32, Layout, Rect, Response, RichText, Sense, Stroke, Ui, Vec2, vec2};
 
+use super::page::Editions;
 use super::{Action, Body, Head, Library, Page, Source};
 use crate::dialogs::{self, Target};
 use crate::theme::{Icon, bold, medium, p, semibold};
 use crate::tidal::{self, Card, Item, Track};
 use crate::view::{Sort, View, in_order, ordered};
-use crate::widgets::{arrow, chip, clickable, clock, fitted, icon_button, link_text, paint_picture, picture, pill, play_disc, search_field, section};
+use crate::widgets::{
+    arrow, chip, clickable, clock, fitted, icon_button, link_text, paint_picture, picture, pill, play_disc, search_field, section, tier_badge, tier_color,
+};
 
 const CARD: f32 = 168.0;
 
@@ -114,15 +117,14 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 start = Some(Start::Radio);
             }
             // An album's other editions, to switch to.
-            if let Some((_, others)) = &head.editions
-                && !others.is_empty()
-            {
+            if let Some(editions) = head.editions.as_ref().filter(|e| !e.others.is_empty()) {
                 let versions = egui::Button::new(RichText::new("Other versions").font(semibold(14.0)).color(p().text))
                     .fill(p().surface)
                     .corner_radius(20.0)
                     .min_size(vec2(0.0, 40.0));
                 egui::containers::menu::MenuButton::from_button(versions).ui(ui, |ui| {
-                    for (name, to) in others {
+                    for (edition, to) in &editions.others {
+                        let name = RichText::new(edition.name(editions.explicit_varies)).color(tier_color(edition.quality));
                         menu_item(ui, actions, name, Action::Open(to.clone()));
                     }
                 });
@@ -169,11 +171,6 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 let line = |text: RichText| fitted(ui, text, width);
                 let title = line(RichText::new(&head.title).font(bold(40.0)).color(p().text));
                 let subtitle = (!byline.is_empty()).then(|| line(RichText::new(&byline).size(15.0).color(p().secondary)));
-                // The edition goes with the length, as "12 TRACKS (44:56) · HI-RES".
-                let length = match (length, &head.editions) {
-                    (Some(length), Some((edition, _))) => Some(format!("{length} · {}", edition.to_uppercase())),
-                    (length, _) => length,
-                };
                 let length = length.map(|length| line(RichText::new(length).font(semibold(12.0)).color(p().secondary)));
                 let gap = 8.0;
                 let height = [Some(&title), subtitle.as_ref(), length.as_ref()].into_iter().flatten().map(|l| l.size().y + gap).sum::<f32>() - gap;
@@ -199,9 +196,23 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                         }
                         (_, None) => {}
                     }
-                    if let Some(length) = length {
-                        ui.label(length);
-                    }
+                    // The edition's tier follows the length, in the badge the player shows it with.
+                    ui.horizontal(|ui| {
+                        if let Some(length) = length {
+                            ui.label(length);
+                        }
+                        if let Some(Editions { this, explicit_varies, .. }) = &head.editions {
+                            if this.atmos {
+                                ui.label(RichText::new("DOLBY ATMOS").font(semibold(12.0)).color(p().secondary));
+                            } else {
+                                ui.add(tier_badge(this.quality).sense(Sense::hover()));
+                            }
+                            if *explicit_varies {
+                                let explicit = if this.explicit { "EXPLICIT" } else { "CLEAN" };
+                                ui.label(RichText::new(explicit).font(semibold(12.0)).color(p().secondary));
+                            }
+                        }
+                    });
                 });
             });
             ui.add_space(24.0);

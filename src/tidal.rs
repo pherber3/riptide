@@ -35,7 +35,7 @@ pub async fn fetch(url: impl reqwest::IntoUrl) -> reqwest::Result<bytes::Bytes> 
 }
 
 /// Tidal's tiers: Low is AAC, High is 16-bit lossless FLAC, Max is hi-res FLAC.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Quality {
     Low,
     High,
@@ -89,8 +89,8 @@ pub struct Track {
     pub gain: Option<f32>,
 }
 
-/// One release of an album. Tidal lists each edition of an album (Hi-Res, Lossless, Dolby Atmos,
-/// explicit or clean) as a release of its own.
+/// One release of an album. Tidal lists each edition of an album (Max, High, Dolby Atmos, explicit
+/// or clean) as a release of its own.
 #[derive(Clone, Debug)]
 pub struct Album {
     pub id: u64,
@@ -102,8 +102,7 @@ pub struct Album {
     pub cover: Option<String>,
     /// The release date, as YYYY-MM-DD.
     pub released: String,
-    pub format: Format,
-    pub explicit: bool,
+    pub edition: Edition,
 }
 
 impl Album {
@@ -115,62 +114,56 @@ impl Album {
     pub fn same_release(&self, other: &Album) -> bool {
         (self.artist_id, &self.title, &self.version, &self.released) == (other.artist_id, &other.title, &other.version, &other.released)
     }
-
-    /// The order editions are chosen in: the best format first, then explicit before clean, as
-    /// the artist released it.
-    pub fn rank(&self) -> (Format, bool) {
-        (self.format, !self.explicit)
-    }
-
-    /// The edition's name, with whether it's explicit when that tells the editions apart.
-    pub fn edition(&self, explicit_varies: bool) -> String {
-        match (explicit_varies, self.explicit) {
-            (false, _) => self.format.name().into(),
-            (true, true) => format!("{} · Explicit", self.format.name()),
-            (true, false) => format!("{} · Clean", self.format.name()),
-        }
-    }
 }
 
-/// How an album edition sounds, in the order editions are chosen. Riptide plays a Dolby Atmos
-/// edition in stereo, as Tidal streams it to desktop apps.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Format {
-    HiRes,
-    Lossless,
-    Atmos,
-    Standard,
+/// What tells an album's editions apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edition {
+    /// The best tier it streams in.
+    pub quality: Quality,
+    /// A Dolby Atmos mix, which Tidal streams to desktop apps in stereo.
+    pub atmos: bool,
+    pub explicit: bool,
 }
 
-impl Format {
+impl Edition {
     fn of(v: &Value) -> Self {
         let tags: Vec<_> = each(&v["mediaMetadata"]["tags"]).filter_map(Value::as_str).collect();
-        match () {
-            _ if tags.contains(&"HIRES_LOSSLESS") => Self::HiRes,
-            _ if tags.contains(&"LOSSLESS") => Self::Lossless,
-            _ if tags.contains(&"DOLBY_ATMOS") => Self::Atmos,
-            _ => Self::Standard,
-        }
+        let quality = match () {
+            _ if tags.contains(&"HIRES_LOSSLESS") => Quality::Max,
+            _ if tags.contains(&"LOSSLESS") => Quality::High,
+            _ => Quality::Low,
+        };
+        let atmos = quality == Quality::Low && tags.contains(&"DOLBY_ATMOS");
+        Self { quality, atmos, explicit: v["explicit"].as_bool().unwrap_or(false) }
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::HiRes => "Hi-Res",
-            Self::Lossless => "Lossless",
-            Self::Atmos => "Dolby Atmos",
-            Self::Standard => "Standard",
+    /// The order editions are chosen in: stereo before Atmos, the best tier, then explicit before
+    /// clean, as the artist released it.
+    pub fn rank(self) -> (bool, std::cmp::Reverse<Quality>, bool) {
+        (self.atmos, std::cmp::Reverse(self.quality), !self.explicit)
+    }
+
+    /// Its name, in the tiers the player shows: "Max · Explicit", saying explicit or clean only
+    /// when that tells the editions apart.
+    pub fn name(self, explicit_varies: bool) -> String {
+        let tier = if self.atmos { "Dolby Atmos" } else { self.quality.name() };
+        match (explicit_varies, self.explicit) {
+            (false, _) => tier.into(),
+            (true, true) => format!("{tier} · Explicit"),
+            (true, false) => format!("{tier} · Clean"),
         }
     }
 }
 
-/// One card per release: of an album's editions, the card keeps the one to open (see `Album::rank`).
+/// One card per release: of an album's editions, the card keeps the one to open (see `Edition::rank`).
 fn one_per_release(cards: Vec<Card>) -> Vec<Card> {
     let mut out: Vec<Card> = Vec::with_capacity(cards.len());
     for card in cards {
         if let Card::Album(album) = &card
             && let Some(Card::Album(kept)) = out.iter_mut().find(|c| matches!(c, Card::Album(k) if k.same_release(album)))
         {
-            if album.rank() < kept.rank() {
+            if album.edition.rank() < kept.edition.rank() {
                 *kept = album.clone();
             }
             continue;
@@ -532,7 +525,7 @@ impl Tidal {
                 None => Vec::new(),
             };
             let mut editions: Vec<Album> = releases.into_iter().filter(|r| r.same_release(&this)).collect();
-            editions.sort_by_key(Album::rank);
+            editions.sort_by_key(|e| e.edition.rank());
             anyhow::Ok((this, editions))
         };
         let ((album, editions), tracks) = tokio::try_join!(about, self.items(&items, &[], 1000, track))?;
@@ -916,8 +909,7 @@ fn album(v: &Value) -> Option<Album> {
         artist_id: artist["id"].as_u64(),
         cover: image_id(&v["cover"]),
         released: text(&v["releaseDate"]),
-        format: Format::of(v),
-        explicit: v["explicit"].as_bool().unwrap_or(false),
+        edition: Edition::of(v),
     })
 }
 

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::tidal::{self, Card, Format, Item, Mix, ROOT, Shelf, Tidal, Track};
+use crate::tidal::{self, Card, Edition, Item, Mix, ROOT, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 
 const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
@@ -87,8 +87,8 @@ pub struct Head {
     pub title: String,
     /// Who made it (an album's artist), linked, ahead of the subtitle.
     pub by: Option<(String, Source)>,
-    /// An album's edition, and its other editions to switch to, as (name, page).
-    pub editions: Option<(String, Vec<(String, Source)>)>,
+    /// An album's edition and the others it comes in.
+    pub editions: Option<Editions>,
     pub subtitle: String,
     pub art: Option<(Option<String>, bool)>,
     pub radio: Option<Source>,
@@ -98,6 +98,15 @@ impl Head {
     fn title(title: impl Into<String>) -> Option<Self> {
         Some(Self { item: None, title: title.into(), by: None, editions: None, subtitle: String::new(), art: None, radio: None })
     }
+}
+
+/// An album's edition, and the others it comes in to switch to.
+#[derive(Clone)]
+pub struct Editions {
+    pub this: Edition,
+    pub others: Vec<(Edition, Source)>,
+    /// Whether some editions are explicit and some clean, so their names say which.
+    pub explicit_varies: bool,
 }
 
 #[derive(Clone)]
@@ -203,10 +212,9 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         Source::Album(id) => {
             let (album, editions, list) = tidal.album(*id).await?;
             // Dolby Atmos editions play in stereo here, so they're not offered as a choice.
-            let explicit_varies = editions.iter().any(|e| e.explicit) && editions.iter().any(|e| !e.explicit);
-            let others = editions.iter().filter(|e| e.id != album.id && e.format != Format::Atmos);
-            let others = others.map(|e| (e.edition(explicit_varies), Source::Album(e.id))).collect();
-            let editions = Some((album.edition(explicit_varies), others));
+            let explicit_varies = editions.iter().any(|e| e.edition.explicit) && editions.iter().any(|e| !e.edition.explicit);
+            let others = editions.iter().filter(|e| e.id != album.id && !e.edition.atmos).map(|e| (e.edition, Source::Album(e.id))).collect();
+            let editions = Some(Editions { this: album.edition, others, explicit_varies });
             let year = album.year().to_string();
             let (by, subtitle) = match album.artist_id {
                 Some(artist) => (Some((album.artist, Source::Artist(artist))), year),

@@ -8,7 +8,7 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{Icon, bold, p, semibold};
 use crate::tidal::{self, Card, Item, Lyrics, Quality};
-use crate::widgets::{bar, clickable, clock, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
+use crate::widgets::{bar, clickable, clock, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_badge, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -281,10 +281,7 @@ impl App {
         ui.add_space(6.0);
         let (tier, format) = status.format.lock().unwrap().clone();
         let (tier, format) = if self.queue.current().is_some() { (tier, format) } else { (self.settings.quality, String::new()) };
-        let color = tier_color(tier);
-        let badge =
-            egui::Button::new(RichText::new(tier.name().to_uppercase()).font(bold(11.0)).color(color)).fill(color.gamma_multiply(0.14)).corner_radius(4.0);
-        egui::containers::menu::MenuButton::from_button(badge).ui(ui, |ui| {
+        egui::containers::menu::MenuButton::from_button(tier_badge(tier)).ui(ui, |ui| {
             for q in Quality::ALL {
                 if ui.radio(self.settings.quality == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
                     actions.push(Action::Quality(q));
