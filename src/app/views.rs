@@ -100,7 +100,7 @@ enum Start {
 /// A page's header, as in Tidal: the artwork with the title, a line about it and the length beside
 /// it, and the buttons in a row underneath.
 fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, library: &Library, actions: &mut Vec<Action>) -> Option<Start> {
-    let mut start = None;
+    let (mut start, mut go) = (None, None);
     let mut buttons = |ui: &mut Ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -147,22 +147,41 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 ui.add_space(32.0);
                 // The lines are laid out first so the block can sit centred beside the artwork.
                 let width = ui.available_width();
-                let lines: Vec<_> = [
-                    Some(RichText::new(&head.title).font(bold(40.0)).color(p().text)),
-                    (!head.subtitle.is_empty()).then(|| RichText::new(&head.subtitle).size(15.0).color(p().secondary)),
-                    length.map(|length| RichText::new(length).font(semibold(12.0)).color(p().secondary)),
-                ]
-                .into_iter()
-                .flatten()
-                .map(|text| fitted(ui, text, width))
-                .collect();
+                let byline = match (&head.by, head.subtitle.as_str()) {
+                    (Some((name, _)), "") => name.clone(),
+                    (Some((name, _)), subtitle) => format!("{name} · {subtitle}"),
+                    (None, subtitle) => subtitle.into(),
+                };
+                let line = |text: RichText| fitted(ui, text, width);
+                let title = line(RichText::new(&head.title).font(bold(40.0)).color(p().text));
+                let subtitle = (!byline.is_empty()).then(|| line(RichText::new(&byline).size(15.0).color(p().secondary)));
+                let length = length.map(|length| line(RichText::new(length).font(semibold(12.0)).color(p().secondary)));
                 let gap = 8.0;
-                let height = lines.iter().map(|line| line.size().y + gap).sum::<f32>() - gap;
+                let height = [Some(&title), subtitle.as_ref(), length.as_ref()].into_iter().flatten().map(|l| l.size().y + gap).sum::<f32>() - gap;
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = gap;
                     ui.add_space(((side - height) / 2.0).max(0.0));
-                    for line in lines {
-                        ui.label(line);
+                    ui.label(title);
+                    match (&head.by, subtitle) {
+                        // The maker's name opens their page.
+                        (Some((name, to)), Some(_)) => {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                if link_text(ui, RichText::new(name).size(15.0).color(p().secondary)).clicked() {
+                                    go = Some(to.clone());
+                                }
+                                if !head.subtitle.is_empty() {
+                                    ui.label(RichText::new(format!(" · {}", head.subtitle)).size(15.0).color(p().secondary));
+                                }
+                            });
+                        }
+                        (_, Some(subtitle)) => {
+                            ui.label(subtitle);
+                        }
+                        (_, None) => {}
+                    }
+                    if let Some(length) = length {
+                        ui.label(length);
                     }
                 });
             });
@@ -178,6 +197,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
         }
     }
     ui.add_space(16.0);
+    actions.extend(go.map(Action::Open));
     start
 }
 

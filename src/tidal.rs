@@ -94,6 +94,7 @@ pub struct Album {
     pub id: u64,
     pub title: String,
     pub artist: String,
+    pub artist_id: Option<u64>,
     pub cover: Option<String>,
     pub year: String,
 }
@@ -802,11 +803,12 @@ fn track(v: &Value) -> Option<Track> {
 }
 
 fn album(v: &Value) -> Option<Album> {
-    let artist = v["artist"]["name"].as_str().or(v["artists"][0]["name"].as_str()).unwrap_or_default();
+    let artist = if v["artist"].is_object() { &v["artist"] } else { &v["artists"][0] };
     Some(Album {
         id: v["id"].as_u64()?,
         title: text(&v["title"]),
-        artist: artist.into(),
+        artist: text(&artist["name"]),
+        artist_id: artist["id"].as_u64(),
         cover: image_id(&v["cover"]),
         year: v["releaseDate"].as_str().unwrap_or_default().chars().take(4).collect(),
     })

@@ -73,6 +73,8 @@ pub struct Head {
     /// What the header's save button saves, or for the user's own playlist, what its menu changes.
     pub item: Option<Item>,
     pub title: String,
+    /// Who made it (an album's artist), linked, ahead of the subtitle.
+    pub by: Option<(String, Source)>,
     pub subtitle: String,
     pub art: Option<(Option<String>, bool)>,
     pub radio: Option<Source>,
@@ -80,7 +82,7 @@ pub struct Head {
 
 impl Head {
     fn title(title: impl Into<String>) -> Option<Self> {
-        Some(Self { item: None, title: title.into(), subtitle: String::new(), art: None, radio: None })
+        Some(Self { item: None, title: title.into(), by: None, subtitle: String::new(), art: None, radio: None })
     }
 }
 
@@ -163,23 +165,32 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         Source::Search(query) => (Head::title(format!("Results for “{query}”")), Body::Shelves(tidal.search(query).await?)),
         Source::Album(id) => {
             let (album, list) = tidal.album(*id).await?;
-            let subtitle = [album.artist.as_str(), &album.year].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+            let (by, subtitle) = match album.artist_id {
+                Some(artist) => (Some((album.artist, Source::Artist(artist))), album.year),
+                // Without an id there is no artist page to open: the name is plain text.
+                None => (None, [album.artist, album.year].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")),
+            };
             let art = Some((tidal::image(album.cover.as_deref(), 640), false));
-            (Some(Head { item: Some(Item::Album(*id)), title: album.title, subtitle, art, radio: None }), tracks(list, false))
+            (Some(Head { item: Some(Item::Album(*id)), title: album.title, by, subtitle, art, radio: None }), tracks(list, false))
         }
         Source::Artist(id) => {
             let (artist, shelves) = tidal.artist(*id).await?;
             let art = Some((tidal::image(artist.picture.as_deref(), 480), true));
-            let head = Head { item: Some(Item::Artist(*id)), title: artist.name, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
+            let head =
+                Head { item: Some(Item::Artist(*id)), title: artist.name, by: None, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
             (Some(head), Body::Shelves(shelves))
         }
         Source::Playlist(id) => {
             let (playlist, list) = tidal.playlist(id).await?;
             let art = Some((tidal::image(playlist.cover.as_deref(), 640), false));
-            (Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, subtitle: String::new(), art, radio: None }), tracks(list, true))
+            (
+                Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, by: None, subtitle: String::new(), art, radio: None }),
+                tracks(list, true),
+            )
         }
         Source::Mix(mix) => {
-            let head = Head { item: None, title: mix.title.clone(), subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), radio: None };
+            let head =
+                Head { item: None, title: mix.title.clone(), by: None, subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), radio: None };
             (Some(head), tracks(tidal.mix_tracks(&mix.id).await?, true))
         }
         Source::Tracks => (Head::title("Tracks"), tracks(tidal.favorite_tracks().await?, true)),
