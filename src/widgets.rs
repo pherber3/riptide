@@ -21,8 +21,10 @@ pub fn tier_choice(ui: &mut Ui, quality: Quality, chosen: Quality) -> Response {
 /// row clickable.
 pub fn tier_row(ui: &mut Ui, quality: Quality, chosen: Quality) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
-    if response.hovered() {
+    // Anywhere on the row counts, over its badge and text too.
+    if ui.rect_contains_pointer(rect) {
         ui.painter().rect_filled(rect, 6.0, p().surface_hover);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let (center, color) = (pos2(rect.left() + 16.0, rect.center().y), tier_color(quality));
     ui.painter().circle_stroke(center, 7.0, Stroke::new(1.5, if quality == chosen { color } else { p().secondary }));
@@ -32,8 +34,8 @@ pub fn tier_row(ui: &mut Ui, quality: Quality, chosen: Quality) -> Response {
     let layout = egui::UiBuilder::new().max_rect(rect.with_min_x(rect.left() + 34.0)).layout(Layout::left_to_right(Align::Center));
     let mut row = ui.new_child(layout);
     row.add(tier_badge(quality).min_size(vec2(46.0, 0.0)).sense(Sense::hover()));
-    row.label(RichText::new(quality.about()).size(13.0).color(p().secondary));
-    clickable(response)
+    row.add(egui::Label::new(RichText::new(quality.about()).size(13.0).color(p().secondary)).selectable(false));
+    response
 }
 
 pub fn tier_color(quality: Quality) -> Color32 {
