@@ -105,10 +105,7 @@ impl App {
             Target::Create(_) | Target::CreateFolder => format!("Created {title}"),
             Target::Rename(_) | Target::RenameFolder(_) => format!("Renamed to {title}"),
         };
-        let renamed = match &target {
-            Target::Rename(id) => Some(Source::Playlist(id.clone())),
-            _ => None,
-        };
+        let renamed = if let Target::Rename(id) = &target { Some(Source::Playlist(id.clone())) } else { None };
         let task = async move {
             match target {
                 Target::Create(track) => {

@@ -56,14 +56,7 @@ pub fn sweep(ctx: &egui::Context) {
         return;
     }
     *swept = now;
-    let mut stale = Vec::new();
-    SHOWN.lock().unwrap().retain(|uri, (_, at)| {
-        let keep = now - *at <= KEEP;
-        if !keep {
-            stale.push(uri.clone());
-        }
-        keep
-    });
+    let stale: Vec<String> = SHOWN.lock().unwrap().extract_if(|_, (_, at)| now - *at > KEEP).map(|(uri, _)| uri).collect();
     stale.iter().for_each(|uri| ctx.forget_image(uri));
 }
 
@@ -93,20 +86,17 @@ impl ImageLoader for Art {
 
     fn load(&self, ctx: &egui::Context, uri: &str, _: SizeHint) -> ImageLoadResult {
         let tidal = ["https://resources.tidal.com/images/", "https://images.tidal.com/"];
-        let Some(name) = tidal.iter().find_map(|prefix| uri.strip_prefix(prefix)) else {
-            return Err(LoadError::NotSupported);
-        };
+        let Some(name) = tidal.iter().find_map(|prefix| uri.strip_prefix(prefix)) else { return Err(LoadError::NotSupported) };
         let mut entries = self.entries.lock().unwrap();
-        match entries.remove(uri) {
-            Some(Entry::Ready(image)) => return Ok(ImagePoll::Ready { image }),
-            Some(Entry::Pending) => {
-                entries.insert(uri.into(), Entry::Pending);
-                return Ok(ImagePoll::Pending { size: None });
+        match entries.get(uri) {
+            // A decoded image is handed over once; egui keeps the texture from then on.
+            Some(Entry::Ready(image)) => {
+                let image = image.clone();
+                entries.remove(uri);
+                return Ok(ImagePoll::Ready { image });
             }
-            Some(Entry::Failed) => {
-                entries.insert(uri.into(), Entry::Failed);
-                return Err(LoadError::Loading("artwork unavailable".into()));
-            }
+            Some(Entry::Pending) => return Ok(ImagePoll::Pending { size: None }),
+            Some(Entry::Failed) => return Err(LoadError::Loading("artwork unavailable".into())),
             None => {}
         }
         entries.insert(uri.into(), Entry::Pending);

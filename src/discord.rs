@@ -28,7 +28,7 @@ impl Discord {
         // A second or two of drift is the clock, not a seek.
         let same = match (self.shown, key) {
             (Some((a, s)), Some((b, t))) => a == b && (s - t).abs() <= 2,
-            (shown, key) => shown.is_none() && key.is_none(),
+            (shown, key) => shown == key,
         };
         if same {
             return;
@@ -119,11 +119,7 @@ fn open(n: u32) -> Option<Pipe> {
 /// the pipe never fills.
 fn send(pipe: &mut Pipe, op: u32, body: &Value) -> io::Result<()> {
     let body = body.to_string();
-    let mut frame = Vec::with_capacity(8 + body.len());
-    frame.extend(op.to_le_bytes());
-    frame.extend((body.len() as u32).to_le_bytes());
-    frame.extend(body.as_bytes());
-    pipe.write_all(&frame)?;
+    pipe.write_all(&[&op.to_le_bytes()[..], &(body.len() as u32).to_le_bytes(), body.as_bytes()].concat())?;
     let mut head = [0; 8];
     pipe.read_exact(&mut head)?;
     let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);

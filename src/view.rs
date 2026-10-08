@@ -15,20 +15,15 @@ pub enum Sort {
 
 impl Sort {
     pub fn label(self, reverse: bool) -> &'static str {
-        match (self, reverse) {
-            (Sort::Added, false) => "Recently added",
-            (Sort::Added, true) => "Oldest added",
-            (Sort::Title, false) => "A–Z",
-            (Sort::Title, true) => "Z–A",
-            (Sort::Artist, false) => "Artist A–Z",
-            (Sort::Artist, true) => "Artist Z–A",
-            (Sort::Album, false) => "Album A–Z",
-            (Sort::Album, true) => "Album Z–A",
-            (Sort::Year, false) => "Newest",
-            (Sort::Year, true) => "Oldest",
-            (Sort::Duration, false) => "Shortest",
-            (Sort::Duration, true) => "Longest",
-        }
+        let (forward, reversed) = match self {
+            Sort::Added => ("Recently added", "Oldest added"),
+            Sort::Title => ("A–Z", "Z–A"),
+            Sort::Artist => ("Artist A–Z", "Artist Z–A"),
+            Sort::Album => ("Album A–Z", "Album Z–A"),
+            Sort::Year => ("Newest", "Oldest"),
+            Sort::Duration => ("Shortest", "Longest"),
+        };
+        if reverse { reversed } else { forward }
     }
 }
 

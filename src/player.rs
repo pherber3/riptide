@@ -45,12 +45,14 @@ pub struct Status {
 }
 
 impl Status {
+    /// Where playback is, or where it's waiting to seek to.
     pub fn position(&self) -> f64 {
-        let pending = f64::from_bits(self.pending_seek.load(Relaxed));
-        if !pending.is_nan() {
-            return pending;
-        }
-        self.played.load(Relaxed) as f64 / self.samples_per_second.load(Relaxed).max(1) as f64
+        self.pending_seek().unwrap_or_else(|| self.played.load(Relaxed) as f64 / self.samples_per_second.load(Relaxed).max(1) as f64)
+    }
+
+    /// A seek waiting for the track to download far enough.
+    fn pending_seek(&self) -> Option<f64> {
+        Some(f64::from_bits(self.pending_seek.load(Relaxed))).filter(|s| !s.is_nan())
     }
 
     /// Sets the volume from the slider's position, on a curve that sounds even across its range.
@@ -112,9 +114,7 @@ impl Render for Sink {
     fn configure(&mut self, _sample_rate: u32, _channels: u16) {}
 
     fn render(&mut self, out: &mut [f32]) {
-        let Ok(mut rx) = self.rx.try_lock() else {
-            return out.fill(0.0);
-        };
+        let Ok(mut rx) = self.rx.try_lock() else { return out.fill(0.0) };
         let gain = f32::from_bits(self.status.gain.load(Relaxed));
         let volume = f32::from_bits(self.status.volume.load(Relaxed)) * gain;
         let n = rx.slots().min(out.len());
@@ -142,7 +142,6 @@ struct Track {
     ready: Vec<f32>,
     sent: usize,
     ended: bool,
-    pending_seek: Option<f64>,
 }
 
 fn set_playing(status: &Status, output: &mut Output<Sink>, play: bool) {
@@ -184,7 +183,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             events(Event::Error(format!("seek failed: {e:#}")));
         }
         restart(t, seconds, format)?;
-        (t.ended, t.pending_seek) = (false, None);
+        t.ended = false;
         status.set_pending_seek(None);
         Ok(())
     };
@@ -203,7 +202,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
         // Wake when about half the buffered audio has played (commands still wake at once).
         let per_second = status.samples_per_second.load(Relaxed).max(1);
         let timeout = match &track {
-            Some(t) if t.pending_seek.is_some() => 10,
+            Some(_) if status.pending_seek().is_some() => 10,
             Some(t) if status.playing.load(Relaxed) => ((RING - t.tx.slots()) as u64 * 500 / per_second).clamp(10, 250),
             _ => 1000,
         };
@@ -220,38 +219,27 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
                 *status.format.lock().unwrap() = (tier, label);
                 let resampler = Resampler::new(i.sample_rate, format.0, format.1)?;
                 let empty = Vec::new;
-                track = Some(Track { decoder, resampler, tx: ring(0.0, format), mapped: empty(), ready: empty(), sent: 0, ended: false, pending_seek: None });
+                track = Some(Track { decoder, resampler, tx: ring(0.0, format), mapped: empty(), ready: empty(), sent: 0, ended: false });
                 status.set_pending_seek(None);
                 set_playing(&status, &mut output, play);
             }
             Ok(Cmd::Toggle) if track.is_some() => set_playing(&status, &mut output, !status.playing.load(Relaxed)),
-            Ok(Cmd::Seek(seconds)) => {
-                if let Some(t) = &mut track {
-                    if t.decoder.can_seek() {
-                        seek(t, seconds, format)?;
-                    } else {
-                        t.pending_seek = Some(seconds);
-                        status.set_pending_seek(Some(seconds));
-                    }
-                }
-            }
+            // The seek happens below, as soon as the track has downloaded far enough.
+            Ok(Cmd::Seek(seconds)) if track.is_some() => status.set_pending_seek(Some(seconds)),
             Ok(Cmd::Stop) => {
                 track = None;
-                status.playing.store(false, Relaxed);
                 status.set_pending_seek(None);
                 ring(0.0, format);
-                output.pause();
+                set_playing(&status, &mut output, false);
             }
             Ok(Cmd::Device(device)) => {
                 let at = status.position();
                 output = open(device)?;
-                if !status.playing.load(Relaxed) {
-                    output.pause();
-                }
+                set_playing(&status, &mut output, status.playing.load(Relaxed));
                 format = (output.sample_rate(), usize::from(output.channels()));
                 reformat(&mut track, at, format)?;
             }
-            Ok(Cmd::Toggle) | Err(RecvTimeoutError::Timeout) => {}
+            Ok(Cmd::Toggle | Cmd::Seek(_)) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
         if let Maintained::Reopened { sample_rate, channels, .. } = output.maintain()
@@ -261,7 +249,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             reformat(&mut track, status.position(), format)?;
         }
         if let Some(t) = &mut track
-            && let Some(seconds) = t.pending_seek
+            && let Some(seconds) = status.pending_seek()
             && t.decoder.can_seek()
         {
             seek(t, seconds, format)?;
@@ -273,8 +261,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
         }
         if t.ended && t.sent == t.ready.len() && t.tx.slots() == RING {
             track = None;
-            status.playing.store(false, Relaxed);
-            output.pause();
+            set_playing(&status, &mut output, false);
             events(Event::Ended);
         }
     }

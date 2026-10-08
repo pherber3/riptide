@@ -55,7 +55,7 @@ impl LastFm {
             params.push(("sk".into(), session.clone()));
         }
         params.sort();
-        let signature: String = params.iter().map(|(k, v)| format!("{k}{v}")).collect::<String>() + &self.secret;
+        let signature = params.iter().map(|(k, v)| format!("{k}{v}")).collect::<String>() + &self.secret;
         params.push(("api_sig".into(), format!("{:x}", Md5::digest(signature))));
         params.push(("format".into(), "json".into()));
         let req = if post { HTTP.post(API).form(&params) } else { HTTP.get(API).query(&params) };

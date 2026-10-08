@@ -121,9 +121,8 @@ fn modal(ctx: &Context, width: f32, heading: &str, body: impl FnOnce(&mut Ui) ->
         let (accepted, cancelled) = body(ui);
         (accepted, cancelled || close)
     });
-    let closed = modal.should_close();
     let (accepted, dismissed) = modal.inner;
-    (accepted, dismissed || closed)
+    (accepted, dismissed || modal.should_close())
 }
 
 fn button(text: &str, ink: Color32, fill: Color32) -> egui::Button<'_> {

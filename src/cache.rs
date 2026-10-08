@@ -66,8 +66,7 @@ pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
     let shared = Arc::new(Shared::default());
     let reader = Reader { file: File::open(path)?, pos: 0, shared: shared.clone() };
     ACTIVE.lock().unwrap().insert(path.into(), (shared.clone(), None));
-    let result = Err("download cancelled".into());
-    Ok((Writer { file, shared, path: path.into(), held: None, result }, reader))
+    Ok((Writer { file, shared, path: path.into(), held: None, result: Err("download cancelled".into()) }, reader))
 }
 
 /// A reader for a finished or in-progress download.
@@ -105,10 +104,7 @@ pub fn keep_only(keep: &[PathBuf]) {
 pub fn evict(dir: &Path, max_bytes: u64) -> io::Result<()> {
     let mut files: Vec<_> = fs::read_dir(dir)?
         .flatten()
-        .filter_map(|e| {
-            let m = e.metadata().ok()?;
-            if m.is_file() { Some((m.modified().ok()?, m.len(), e.path())) } else { None }
-        })
+        .filter_map(|e| e.metadata().ok().filter(fs::Metadata::is_file).and_then(|m| Some((m.modified().ok()?, m.len(), e.path()))))
         .collect();
     files.sort();
     let mut total: u64 = files.iter().map(|f| f.1).sum();
@@ -147,8 +143,7 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        let result = std::mem::replace(&mut self.result, Ok(()));
-        let result = result.and_then(|()| File::create(marker(&self.path)).map(drop).map_err(|e| e.to_string()));
+        let result = std::mem::replace(&mut self.result, Ok(())).and_then(|()| File::create(marker(&self.path)).map(drop).map_err(|e| e.to_string()));
         let mut p = self.shared.progress.lock().unwrap();
         p.written += self.held.unwrap_or(0);
         p.done = true;

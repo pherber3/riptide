@@ -44,8 +44,7 @@ impl Decoder {
             codec: symphonia::default::get_codecs().get_codec(p.codec).map_or("?", |c| c.short_name),
         };
         let decoder = symphonia::default::get_codecs().make(p, &DecoderOptions::default())?;
-        let track = track.id;
-        Ok(Self { format, decoder, track, download, samples: None, info })
+        Ok(Self { track: track.id, format, decoder, download, samples: None, info })
     }
 
     /// Seeking needs the stream's full length, which is known once the download is done.

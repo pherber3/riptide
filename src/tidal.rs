@@ -24,10 +24,8 @@ const CLIENT: &str = "NkJEU1JkcEs5aHFFQlRnVTt4ZXVQbVk3bmJwWjlJSWJMQWNROTNzaGthMV
 
 /// One client for everything (API, audio, artwork), so connections are reused; timeouts turn a stalled
 /// network into an error.
-pub static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(20));
-    builder.build().expect("HTTP client")
-});
+pub static HTTP: LazyLock<reqwest::Client> =
+    LazyLock::new(|| reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(20)).build().expect("HTTP client"));
 
 /// A plain download (a stream segment, artwork), failing on an error status.
 pub async fn fetch(url: impl reqwest::IntoUrl) -> reqwest::Result<bytes::Bytes> {
@@ -390,7 +388,8 @@ impl Login {
             ("client_unique_key", &self.unique_key),
         ];
         let session = Session::from_token(&token(&form).await?, None)?;
-        Tidal::new(session, path)
+        crate::json::save(path, &session)?;
+        Ok(Tidal::new(session, path))
     }
 }
 
@@ -403,19 +402,13 @@ pub struct Tidal {
 }
 
 impl Tidal {
-    fn with(session: Session, path: &Path) -> Self {
+    fn new(session: Session, path: &Path) -> Self {
         Self { session: Arc::new(tokio::sync::Mutex::new(session)), path: Arc::new(path.into()) }
-    }
-
-    /// A new sign-in, saved for next time.
-    fn new(session: Session, path: &Path) -> Result<Self> {
-        crate::json::save(path, &session)?;
-        Ok(Self::with(session, path))
     }
 
     pub async fn load(path: &Path) -> Result<Self> {
         let session = crate::json::load(path).context("not signed in")?;
-        let tidal = Self::with(session, path);
+        let tidal = Self::new(session, path);
         tidal.auth().await?;
         Ok(tidal)
     }
@@ -472,8 +465,7 @@ impl Tidal {
     pub async fn stream(&self, track_id: u64, quality: Quality) -> Result<Parts> {
         let query = [("audioquality", quality.api()), ("playbackmode", "STREAM"), ("assetpresentation", "FULL")];
         let info = self.get(&format!("{V1}/tracks/{track_id}/playbackinfopostpaywall"), &query).await?;
-        let manifest = STANDARD.decode(info["manifest"].as_str().context("no stream manifest")?)?;
-        let manifest = String::from_utf8(manifest)?;
+        let manifest = String::from_utf8(STANDARD.decode(info["manifest"].as_str().context("no stream manifest")?)?)?;
         if let Ok(json) = serde_json::from_str::<Value>(&manifest) {
             return Ok(Parts::Urls(json["urls"].as_array().context("no stream URLs")?.iter().map(text).collect()));
         }
@@ -495,8 +487,7 @@ impl Tidal {
         };
         let mut tracks = list(&v["tracks"]["items"], track);
         if let Some(at) = tracks.iter().position(|t| Some(t.id) == hit["id"].as_u64()).filter(|_| v["topHit"]["type"] == "TRACKS") {
-            let first = tracks.remove(at);
-            tracks.insert(0, first);
+            tracks[..=at].rotate_right(1);
         }
         let shelves = [
             Shelf::cards("Top result", top.into_iter().collect()),
@@ -512,7 +503,6 @@ impl Tidal {
     /// editions, so they are found among the artist's releases, while the tracks load.
     pub async fn album(&self, id: u64) -> Result<(Album, Vec<Album>, Vec<Track>)> {
         let url = format!("{V1}/albums/{id}");
-        let items = format!("{url}/items");
         let about = async {
             let info = self.get(&url, &[]).await?;
             let this = album(&info).context("bad album")?;
@@ -528,6 +518,7 @@ impl Tidal {
             editions.sort_by_key(|e| e.edition.rank());
             anyhow::Ok((this, editions))
         };
+        let items = format!("{url}/items");
         let ((album, editions), tracks) = tokio::try_join!(about, self.items(&items, &[], 1000, track))?;
         Ok((album, editions, tracks))
     }
@@ -536,15 +527,13 @@ impl Tidal {
     pub async fn artist(&self, id: u64) -> Result<(Artist, Vec<Shelf>)> {
         let url = format!("{V1}/artists/{id}");
         let (top_url, albums_url, similar_url, bio_url) = (format!("{url}/toptracks"), format!("{url}/albums"), format!("{url}/similar"), format!("{url}/bio"));
-        const SINGLES: &[(&str, &str)] = &[("filter", "EPSANDSINGLES")];
-        const COMPILATIONS: &[(&str, &str)] = &[("filter", "COMPILATIONS")];
         let releases = |filter| self.items(&albums_url, filter, 200, |v| album(v).map(Card::Album));
         let (info, top, albums, singles, compilations, similar, bio) = tokio::join!(
             self.get(&url, &[]),
             self.get(&top_url, &[("limit", "10")]),
             releases(&[]),
-            releases(SINGLES),
-            releases(COMPILATIONS),
+            releases(&[("filter", "EPSANDSINGLES")]),
+            releases(&[("filter", "COMPILATIONS")]),
             self.get(&similar_url, &[("limit", "20")]),
             self.get(&bio_url, &[]),
         );
@@ -757,7 +746,7 @@ impl Tidal {
     }
 
     pub async fn rename_folder(&self, id: &str, name: &str) -> Result<()> {
-        self.folders("rename", &[("trn", &format!("trn:folder:{id}")), ("name", name)]).await.map(drop)
+        self.folders("rename", &[("trn", &Entry::Folder(id).trn()), ("name", name)]).await.map(drop)
     }
 
     /// Deletes a folder, first moving what is in it to the top level so no playlist goes with it.
@@ -794,10 +783,10 @@ impl Tidal {
         };
         let url = format!("{}/favorites/{kind}", self.user().await?);
         match on {
-            true => self.send(Method::POST, &url, &[], &[(field, &id)]).await?,
-            false => self.send(Method::DELETE, &format!("{url}/{id}"), &[], &[]).await?,
-        };
-        Ok(())
+            true => self.send(Method::POST, &url, &[], &[(field, &id)]).await,
+            false => self.send(Method::DELETE, &format!("{url}/{id}"), &[], &[]).await,
+        }
+        .map(drop)
     }
 }
 
@@ -810,7 +799,7 @@ fn dash(xml: &str) -> Option<Parts> {
     let count = xml
         .split("<S ")
         .skip(1)
-        .map(|s| 1 + attr(&format!(" {}", &s[..s.find('>').unwrap_or(s.len())]), "r").and_then(|r| r.parse::<u32>().ok()).unwrap_or(0))
+        .map(|s| 1 + attr(&format!(" {}", s.split('>').next().unwrap_or_default()), "r").and_then(|r| r.parse::<u32>().ok()).unwrap_or(0))
         .sum();
     Some(Parts::Segments {
         init: attr(xml, "initialization")?,

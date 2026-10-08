@@ -119,11 +119,11 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response
     if !ui.is_rect_visible(rect) {
         return response;
     }
-    let hovered = response.hovered();
-    if selected || hovered {
+    let lit = selected || response.hovered();
+    if lit {
         ui.painter().rect_filled(rect, 8.0, if selected { p().surface_hover } else { p().surface });
     }
-    let color = if selected || hovered { p().text } else { p().secondary };
+    let color = if lit { p().text } else { p().secondary };
     icon.image(color, 18.0).paint_at(ui, Rect::from_min_size(rect.left_center() + vec2(10.0, -9.0), Vec2::splat(18.0)));
     let galley = fitted(ui, RichText::new(text).font(medium(14.0)), rect.width() - 48.0);
     ui.painter().galley(pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0), galley, color);

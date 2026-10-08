@@ -13,13 +13,9 @@ use crate::widgets::{
 };
 
 const CARD: f32 = 168.0;
-
 const NUMBER: f32 = 36.0;
-
 const TIME: f32 = 56.0;
-
 const HEART: f32 = 32.0;
-
 const THUMB: f32 = 38.0;
 
 /// A playlist row being dragged to a new place, by position.
@@ -135,7 +131,10 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 actions.push(Action::CopyLink(item.link()));
             }
             match &head.item {
-                Some(Item::Playlist(id)) if library.mine(id) => playlist_menu(ui, id, &head.title, &library.folders, actions),
+                Some(Item::Playlist(id)) if library.mine(id) => {
+                    let more = egui::Button::image(Icon::More.image(p().secondary, 22.0)).frame(false);
+                    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| playlist_actions(ui, id, &head.title, &library.folders, actions));
+                }
                 // An artist is followed with a heart; an album or playlist is added to its list.
                 Some(item) => {
                     let on = library.saved.contains(item);
@@ -229,12 +228,6 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
     ui.add_space(16.0);
     actions.extend(go.map(Action::Open));
     start
-}
-
-/// The ⋯ menu of one of the user's own playlists.
-fn playlist_menu(ui: &mut Ui, id: &str, title: &str, folders: &[Card], actions: &mut Vec<Action>) {
-    let more = egui::Button::image(Icon::More.image(p().secondary, 22.0)).frame(false);
-    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| playlist_actions(ui, id, title, folders, actions));
 }
 
 /// Rename, move or delete one of the user's own playlists: its ⋯ menu, or right-click in the sidebar.
@@ -386,7 +379,7 @@ fn about(ui: &mut Ui, text: &str) {
 }
 
 /// A fixed-width cell of a track row, its content centred vertically.
-fn cell(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui)) {
+fn cell<R>(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui) -> R) {
     ui.allocate_ui_with_layout(vec2(width, height), Layout::left_to_right(Align::Center), |ui| {
         ui.set_width(width);
         add(ui);
@@ -426,20 +419,20 @@ impl Rows<'_> {
                 _ => None,
             };
             let added = tracks.first().is_some_and(|t| t.added.is_some());
-            let columns = [
+            let columns: Vec<_> = [
                 (Sort::Title, "TITLE", 0.4, true),
                 (Sort::Artist, "ARTIST", 0.25, true),
                 (Sort::Album, "ALBUM", 0.22, album),
                 (Sort::Added, "DATE ADDED", 0.13, added),
-            ];
-            let columns: Vec<_> = columns.into_iter().filter(|c| c.3).collect();
+            ]
+            .into_iter()
+            .filter(|c| c.3)
+            .collect();
             let free = ui.available_width() - NUMBER - TIME - HEART - ui.spacing().item_spacing.x * 6.0;
             let total: f32 = columns.iter().map(|c| c.2).sum();
             let width = |share: f32| free * share / total;
             ui.horizontal(|ui| {
-                cell(ui, NUMBER, 28.0, |ui| {
-                    ui.label(RichText::new("#").font(medium(11.0)).color(p().dim));
-                });
+                cell(ui, NUMBER, 28.0, |ui| ui.label(RichText::new("#").font(medium(11.0)).color(p().dim)));
                 for &(sort, name, share, _) in &columns {
                     cell(ui, width(share), 28.0, |ui| column_header(ui, name, sort, sorted, actions));
                 }
@@ -491,14 +484,8 @@ impl Rows<'_> {
                                     picture(ui, tidal::image(t.cover.as_deref(), 80), THUMB, false);
                                     ui.add_space(4.0);
                                 }
-                                let color = if playing { p().accent } else { p().text };
-                                let title = ui.add(
-                                    egui::Label::new(RichText::new(&t.title).font(medium(14.0)).color(color))
-                                        .truncate()
-                                        .selectable(false)
-                                        .sense(Sense::click()),
-                                );
-                                if title.clicked() {
+                                let title = RichText::new(&t.title).font(medium(14.0)).color(if playing { p().accent } else { p().text });
+                                if ui.add(egui::Label::new(title).truncate().selectable(false).sense(Sense::click())).clicked() {
                                     actions.push(play());
                                 }
                             }
@@ -509,9 +496,7 @@ impl Rows<'_> {
                             }
                         });
                     }
-                    cell(ui, TIME, height, |ui| {
-                        ui.label(RichText::new(clock(f64::from(t.duration))).color(p().secondary));
-                    });
+                    cell(ui, TIME, height, |ui| ui.label(RichText::new(clock(f64::from(t.duration))).color(p().secondary)));
                     heart(ui, t.id, self.library, hovered, actions);
                 });
                 if row.double_clicked() {

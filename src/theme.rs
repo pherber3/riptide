@@ -30,10 +30,7 @@ pub struct Palette {
     pub secondary: Color32,
     pub dim: Color32,
     pub accent: Color32,
-    pub accent_hover: Color32,
-    pub on_accent: Color32,
     pub danger: Color32,
-    pub warning: Color32,
     /// Menus and popups.
     pub overlay: Color32,
     pub shadow: Color32,
@@ -52,10 +49,7 @@ pub const DARK: Palette = Palette {
     secondary: rgb(0xa1a1a6),
     dim: rgb(0x6b6b70),
     accent: TEAL,
-    accent_hover: rgb(0x80fff5),
-    on_accent: rgb(0x000000),
     danger: rgb(0xff6b6b),
-    warning: GOLD,
     overlay: rgb(0x1e1e22),
     shadow: Color32::from_black_alpha(160),
 };
@@ -72,10 +66,7 @@ const LIGHT: Palette = Palette {
     secondary: rgb(0x6e6e73),
     dim: rgb(0xa1a1a6),
     accent: rgb(0x0e9f94),
-    accent_hover: rgb(0x0b857c),
-    on_accent: rgb(0xffffff),
     danger: rgb(0xd63b4c),
-    warning: rgb(0xb8860b),
     overlay: rgb(0xffffff),
     shadow: Color32::from_black_alpha(50),
 };
@@ -100,12 +91,11 @@ impl fastframe_theme::Palette for Palette {
             "secondary" => &mut self.secondary,
             "dim" => &mut self.dim,
             "accent" => &mut self.accent,
-            "accent_hover" => &mut self.accent_hover,
-            "on_accent" => &mut self.on_accent,
             "danger" => &mut self.danger,
-            "warning" => &mut self.warning,
             "overlay" => &mut self.overlay,
             "shadow" => &mut self.shadow,
+            // Base colours Riptide draws nothing with, accepted so theme files can set them.
+            "accent_hover" | "on_accent" | "warning" => return true,
             _ => return false,
         };
         *slot = color;
@@ -171,12 +161,12 @@ fastframe_icons::icons! {
     }
 }
 
-/// The app's logo at `size` pixels square, as RGBA: the window, taskbar and tray icon.
 /// Where the theme files are kept, in the data folder.
 pub fn folder(data: &std::path::Path) -> std::path::PathBuf {
     data.join("themes")
 }
 
+/// The app's logo at `size` pixels square, as RGBA: the window, taskbar and tray icon.
 pub fn logo(size: usize) -> Vec<u8> {
     let image = image::load_from_memory(include_bytes!("../assets/riptide.png")).expect("bundled icon");
     let size = size as u32;

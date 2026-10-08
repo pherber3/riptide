@@ -27,13 +27,6 @@ jobs:
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config cmake libclang-dev libasound2-dev libpulse-dev \
-            libdbus-1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
-
       - name: Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -46,6 +39,9 @@ jobs:
       - name: Linux
         if: runner.os == 'Linux'
         run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake libclang-dev libasound2-dev libpulse-dev \
+            libdbus-1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
           cargo build --release
           mkdir -p dist/riptide
           cp target/release/riptide README.md LICENSE assets/riptide.png dist/riptide/

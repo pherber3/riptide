@@ -47,7 +47,6 @@ fn main() -> Result<()> {
     let dir = home()?;
     let data = dir.join("data");
     std::fs::create_dir_all(&data)?;
-    let session = tidal::session_path(&data);
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => {
@@ -80,7 +79,7 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&cache_dir)?;
             cache::evict(&cache_dir, CACHE_BYTES)?;
             let rt = tokio::runtime::Runtime::new()?;
-            let tidal = rt.block_on(Tidal::load(&session))?;
+            let tidal = rt.block_on(Tidal::load(&tidal::session_path(&data)))?;
             let reader = rt.block_on(stream::track(&tidal, &cache_dir, id.parse()?, quality))?;
             let (tx, rx) = channel();
             let player = Player::start(None, move |e| {

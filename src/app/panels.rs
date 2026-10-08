@@ -63,13 +63,9 @@ impl App {
                 ui.label(RichText::new("riptide").font(bold(20.0)).color(p().text));
             });
             ui.add_space(16.0);
-            let top = [
-                (Icon::Home, "Home", open == Some(&Source::Home), Action::Open(Source::Home)),
-                (Icon::Explore, "Explore", open == Some(&Source::explore()), Action::Open(Source::explore())),
-            ];
-            for (icon, text, selected, action) in top {
-                if nav_item(ui, icon, text, selected).clicked() {
-                    actions.push(action);
+            for (icon, text, source) in [(Icon::Home, "Home", Source::Home), (Icon::Explore, "Explore", Source::explore())] {
+                if nav_item(ui, icon, text, open == Some(&source)).clicked() {
+                    actions.push(Action::Open(source));
                 }
             }
             ui.add_space(22.0);
@@ -279,8 +275,7 @@ impl App {
             }
         }
         ui.add_space(6.0);
-        let (tier, format) = status.format.lock().unwrap().clone();
-        let (tier, format) = if self.queue.current().is_some() { (tier, format) } else { (self.settings.quality, String::new()) };
+        let (tier, format) = if self.queue.current().is_some() { status.format.lock().unwrap().clone() } else { (self.settings.quality, String::new()) };
         egui::containers::menu::MenuButton::from_button(tier_badge(tier)).ui(ui, |ui| {
             for q in Quality::ALL {
                 if ui.radio(self.settings.quality == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
@@ -447,12 +442,8 @@ fn lyric_column(ui: &mut Ui, lyrics: Option<&Lyrics>, position: f64, shown: &mut
         // Laid out without a colour and painted in the one for where it lands, so the
         // fade never re-shapes the text.
         let lyric = |ui: &mut Ui, text: RichText, color: Color32| {
-            let galley = egui::WidgetText::from(text.color(Color32::PLACEHOLDER)).into_galley(
-                ui,
-                Some(egui::TextWrapMode::Wrap),
-                ui.available_width(),
-                egui::TextStyle::Body,
-            );
+            let text = egui::WidgetText::from(text.color(Color32::PLACEHOLDER));
+            let galley = text.into_galley(ui, Some(egui::TextWrapMode::Wrap), ui.available_width(), egui::TextStyle::Body);
             let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
             if ui.is_rect_visible(rect) {
                 let y = rect.center().y;

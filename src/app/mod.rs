@@ -259,7 +259,7 @@ impl App {
         });
     }
 
-    /// A background call with no result but, once it's done, an optional note in the top bar.
+    /// A background call with no result; an error shows in the top bar.
     fn run(&self, task: impl Future<Output = Result<()>> + Send + 'static) {
         self.spawn(async move {
             task.await?;
@@ -275,10 +275,7 @@ impl App {
         self.spawn(async move {
             task.await?;
             let library = Library::load(&tidal).await?;
-            let page = match source {
-                Some(source) => Some(load(tidal, source).await?),
-                None => None,
-            };
+            let page = if let Some(source) = source { Some(load(tidal, source).await?) } else { None };
             Ok(then(move |app| {
                 app.library = library;
                 app.note(notice);
@@ -352,7 +349,6 @@ impl App {
         });
     }
 
-    /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
     /// Shows a page, in its kind's remembered sort. The page it replaces goes into history, unless
     /// `replace` says not to, or the new page is a fresh copy of it.
     fn show(&mut self, mut page: Page, replace: bool) {

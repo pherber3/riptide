@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use futures_util::{StreamExt, stream};
+use futures_util::{StreamExt, TryStreamExt, stream};
 
 use crate::cache::{self, Reader, Writer};
 use crate::tidal::{self, HTTP, Parts, Quality, Tidal};
@@ -60,16 +60,13 @@ async fn fetch(parts: &Parts, w: &mut Writer) -> Result<()> {
             // A few segments in flight at once, written in order.
             anyhow::ensure!(*count > 0, "the stream manifest lists no segments");
             let mut segments = stream::iter(*start..start + count).map(|n| tidal::fetch(template.replace("$Number$", &n.to_string()))).buffered(PARALLEL);
-            while let Some(segment) = segments.next().await {
-                let segment = segment?;
+            while let Some(segment) = segments.try_next().await? {
                 if dfla.is_none() {
                     w.append(&segment)?;
                     continue;
                 }
-                for (kind, body) in boxes(&segment) {
-                    if kind == b"mdat" {
-                        w.append(body)?;
-                    }
+                for (_, mdat) in boxes(&segment).filter(|(kind, _)| *kind == b"mdat") {
+                    w.append(mdat)?;
                 }
             }
         }

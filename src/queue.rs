@@ -105,10 +105,7 @@ impl Queue {
     /// What follows the current track: the next one, or the first again with repeat-all.
     pub fn after(&self) -> Option<usize> {
         let i = self.index?;
-        match i + 1 < self.tracks.len() {
-            true => Some(i + 1),
-            false => (self.repeat == Repeat::All).then_some(0),
-        }
+        (i + 1 < self.tracks.len()).then_some(i + 1).or((self.repeat == Repeat::All).then_some(0))
     }
 
     /// Appends the tracks not already queued (autoplay), returning the first new one's index.
