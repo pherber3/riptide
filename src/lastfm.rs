@@ -100,7 +100,7 @@ impl LastFm {
     pub async fn scrobble(&self, listen: Option<(&Track, u64)>) -> Result<()> {
         let _sending = SENDING.lock().await;
         let path = self.path.with_file_name("scrobbles.json");
-        let mut waiting: Vec<(Track, u64)> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut waiting: Vec<(Track, u64)> = crate::json::load(&path).unwrap_or_default();
         waiting.extend(listen.map(|(t, at)| (t.clone(), at)));
         let mut result = Ok(());
         while !waiting.is_empty() {
@@ -118,7 +118,7 @@ impl LastFm {
         }
         match waiting.is_empty() {
             true => drop(std::fs::remove_file(&path)),
-            false => std::fs::write(&path, serde_json::to_vec(&waiting)?)?,
+            false => crate::json::save(&path, &waiting)?,
         }
         result
     }

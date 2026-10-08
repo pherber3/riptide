@@ -317,17 +317,19 @@ pub struct Tidal {
 }
 
 impl Tidal {
+    fn with(session: Session, path: &Path) -> Self {
+        Self { session: Arc::new(tokio::sync::Mutex::new(session)), path: Arc::new(path.into()) }
+    }
+
     /// A new sign-in, saved for next time.
     fn new(session: Session, path: &Path) -> Result<Self> {
-        std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
-        std::fs::write(path, serde_json::to_string(&session)?)?;
-        Ok(Self { session: Arc::new(tokio::sync::Mutex::new(session)), path: Arc::new(path.into()) })
+        crate::json::save(path, &session)?;
+        Ok(Self::with(session, path))
     }
 
     pub async fn load(path: &Path) -> Result<Self> {
-        let json = std::fs::read_to_string(path).context("not signed in")?;
-        let session = serde_json::from_str(&json).context("please sign in again")?;
-        let tidal = Self { session: Arc::new(tokio::sync::Mutex::new(session)), path: Arc::new(path.into()) };
+        let session = crate::json::load(path).context("not signed in")?;
+        let tidal = Self::with(session, path);
         tidal.auth().await?;
         Ok(tidal)
     }
@@ -338,7 +340,7 @@ impl Tidal {
         if now() >= s.expires_at {
             let refreshed = token(&[("grant_type", "refresh_token"), ("refresh_token", &s.refresh_token)]).await?;
             *s = Session::from_token(&refreshed, Some(&s.refresh_token))?;
-            std::fs::write(&*self.path, serde_json::to_string(&*s)?)?;
+            crate::json::save(&self.path, &*s)?;
         }
         Ok((s.access_token.clone(), s.country.clone(), s.user_id))
     }
@@ -353,11 +355,7 @@ impl Tidal {
     }
 
     async fn send(&self, method: Method, url: &str, query: &[(&str, &str)], form: &[(&str, &str)]) -> Result<reqwest::Response> {
-        let mut req = self.request(method, url, query).await?;
-        if !form.is_empty() {
-            req = req.form(form);
-        }
-        Ok(req.send().await?.error_for_status()?)
+        submit(self.request(method, url, query).await?, form).await
     }
 
     async fn get(&self, url: &str, query: &[(&str, &str)]) -> Result<Value> {
@@ -374,7 +372,7 @@ impl Tidal {
             let mut paged = vec![("limit", "50"), ("offset", offset.as_str())];
             paged.extend_from_slice(query);
             let v = self.get(url, &paged).await?;
-            let items: Vec<T> = v["items"].as_array().into_iter().flatten().filter_map(parse).collect();
+            let items = list(&v["items"], parse);
             anyhow::Ok((v["totalNumberOfItems"].as_u64().unwrap_or(0) as usize, items))
         };
         let (total, mut items) = page(0).await?;
@@ -467,7 +465,7 @@ impl Tidal {
     /// Tidal's personal home feed: recently played, your top playlists, mixes and the rest.
     pub async fn home(&self) -> Result<Vec<Shelf>> {
         let feed = self.get(&format!("{V2}/home/feed/static"), &[("platform", "WEB"), ("limit", "20")]).await?;
-        let shelves = feed["items"].as_array().into_iter().flatten().filter_map(|module| {
+        let shelves = each(&feed["items"]).filter_map(|module| {
             let mut shelf = Shelf { more: module["viewAll"].as_str().map(Into::into), ..Shelf::named(text(&module["title"])) };
             for item in module["items"].as_array()? {
                 shelf.add(item["type"].as_str()?, &item["data"]);
@@ -483,13 +481,13 @@ impl Tidal {
         if path.starts_with("home/") {
             let v = self.get(&format!("{V2}/{path}"), &[("platform", "WEB"), ("limit", "50")]).await?;
             let mut shelf = Shelf::default();
-            for item in v["items"].as_array().into_iter().flatten() {
+            for item in each(&v["items"]) {
                 shelf.add(item["type"].as_str().unwrap_or_default(), &item["data"]);
             }
             return Ok((text(&v["title"]), vec![shelf]));
         }
         let v = self.get(&format!("{V1}/{path}"), &[("deviceType", "BROWSER"), ("locale", "en_US")]).await?;
-        let modules = v["rows"].as_array().into_iter().flatten().flat_map(|row| row["modules"].as_array().into_iter().flatten());
+        let modules = each(&v["rows"]).flat_map(|row| each(&row["modules"]));
         let shelves = modules.filter_map(|m| {
             let kind = m["type"].as_str()?;
             let mut shelf = Shelf { more: m["showMore"]["apiPath"].as_str().map(Into::into), ..Shelf::named(text(&m["title"])) };
@@ -512,7 +510,7 @@ impl Tidal {
             let names: Vec<String> = c["contributors"].as_array()?.iter().map(|p| text(&p["name"])).collect();
             Some((text(&c["type"]), names.join(", ")))
         };
-        Ok(v.as_array().into_iter().flatten().filter_map(role).collect())
+        Ok(list(&v, role))
     }
 
     pub async fn mix_tracks(&self, id: &str) -> Result<Vec<Track>> {
@@ -590,7 +588,7 @@ impl Tidal {
             let query = [("includeOnly", "PLAYLIST"), ("limit", "50"), ("order", "DATE_UPDATED"), ("orderDirection", "DESC"), ("cursor", cursor.as_str())];
             let mut page = self.get(&url, &query).await?;
             let mine = |item: &&Value| item["data"]["creator"]["id"].as_u64() == Some(user);
-            playlists.extend(page["items"].as_array().into_iter().flatten().filter(mine).filter_map(|item| playlist(&item["data"])));
+            playlists.extend(each(&page["items"]).filter(mine).filter_map(|item| playlist(&item["data"])));
             match page["cursor"].take() {
                 Value::String(next) if !next.is_empty() => cursor = next,
                 _ => return Ok(playlists),
@@ -628,12 +626,8 @@ impl Tidal {
         let current = self.send(Method::GET, &url, &[], &[]).await?;
         let version = current.headers().get("etag").context("no playlist version")?.clone();
         current.bytes().await?; // read to the end so the connection is reused
-        let mut req = self.request(method, &format!("{url}{path}"), query).await?.header("If-None-Match", version);
-        if !form.is_empty() {
-            req = req.form(form);
-        }
-        req.send().await?.error_for_status()?;
-        Ok(())
+        let req = self.request(method, &format!("{url}{path}"), query).await?.header("If-None-Match", version);
+        submit(req, form).await.map(drop)
     }
 
     /// Moves a playlist or folder into a folder (`ROOT` is the top level).
@@ -679,7 +673,7 @@ impl Tidal {
     /// Everything saved to the collection: tracks, albums, artists and playlists.
     pub async fn saved(&self) -> Result<HashSet<Item>> {
         let v = self.get(&format!("{}/favorites/ids", self.user().await?), &[]).await?;
-        let ids = |kind: &str| v[kind].as_array().into_iter().flatten().filter_map(Value::as_str);
+        let ids = |kind: &str| each(&v[kind]).filter_map(Value::as_str);
         let number = |id: &str| id.parse().ok();
         let mut saved: HashSet<Item> = ids("TRACK").filter_map(number).map(Item::Track).collect();
         saved.extend(ids("ALBUM").filter_map(number).map(Item::Album));
@@ -734,8 +728,19 @@ fn lrc(subtitles: &str) -> Vec<(f64, String)> {
     subtitles.lines().filter_map(line).collect()
 }
 
-fn list<T>(v: &Value, parse: fn(&Value) -> Option<T>) -> Vec<T> {
-    v.as_array().map_or_else(Vec::new, |a| a.iter().filter_map(parse).collect())
+/// Sends a request, with a form body when there is one, and fails on an error status.
+async fn submit(req: reqwest::RequestBuilder, form: &[(&str, impl serde::Serialize)]) -> Result<reqwest::Response> {
+    let req = if form.is_empty() { req } else { req.form(form) };
+    Ok(req.send().await?.error_for_status()?)
+}
+
+/// The elements of a JSON array; none for anything else.
+fn each(v: &Value) -> impl Iterator<Item = &Value> {
+    v.as_array().into_iter().flatten()
+}
+
+fn list<T>(v: &Value, parse: impl Fn(&Value) -> Option<T>) -> Vec<T> {
+    each(v).filter_map(parse).collect()
 }
 
 /// Tidal's text without its link markup (`[wimpLink artistId="1"]Name[/wimpLink]`).

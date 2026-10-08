@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,13 +30,11 @@ pub struct Queue {
 impl Queue {
     /// The queue and the position in its current track, as the app was left.
     pub fn load(path: &Path) -> Option<(Self, f64)> {
-        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+        crate::json::load(path)
     }
 
     pub fn save(&self, path: &Path, position: f64) {
-        if let Ok(json) = serde_json::to_vec(&(self, position)) {
-            let _ = std::fs::write(path, json);
-        }
+        let _ = crate::json::save(path, &(self, position));
     }
 
     pub fn current(&self) -> Option<&Track> {
@@ -147,5 +144,5 @@ fn shuffle_slice<T>(items: &mut [T]) {
 }
 
 fn seed() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
+    getrandom::u64().unwrap_or(1)
 }

@@ -7,6 +7,7 @@ mod decode;
 mod dialogs;
 mod discord;
 mod fonts;
+mod json;
 mod lastfm;
 mod player;
 mod queue;

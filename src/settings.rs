@@ -45,13 +45,11 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(data: &Path) -> Self {
-        std::fs::read(data.join("settings.json")).ok().and_then(|json| serde_json::from_slice(&json).ok()).unwrap_or_default()
+        crate::json::load(&data.join("settings.json")).unwrap_or_default()
     }
 
     pub fn save(&self, data: &Path) {
-        if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(data.join("settings.json"), json);
-        }
+        let _ = crate::json::save(&data.join("settings.json"), self);
     }
 }
 
