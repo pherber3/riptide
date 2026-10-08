@@ -10,7 +10,7 @@ use crate::app::Action;
 use crate::theme::{Palette, bold, p};
 use crate::tidal::Quality;
 use crate::view::Sort;
-use crate::widgets::{section, setting as row, switch, tier_color};
+use crate::widgets::{section, setting as row, switch, tier_choice};
 
 /// What Riptide remembers between runs, besides the sign-in and the queue: `data/settings.json`.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -107,7 +107,7 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
         };
         row(ui, "Streaming quality", detail, |ui| {
             for q in Quality::ALL.into_iter().rev() {
-                if ui.add(egui::Button::selectable(s.quality == q, RichText::new(q.name()).color(tier_color(q)))).clicked() {
+                if tier_choice(ui, q, s.quality).clicked() {
                     actions.push(Action::Quality(q));
                 }
             }

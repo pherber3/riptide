@@ -12,6 +12,11 @@ pub fn tier_badge(quality: Quality) -> egui::Button<'static> {
     egui::Button::new(RichText::new(quality.name().to_uppercase()).font(bold(11.0)).color(color)).fill(color.gamma_multiply(0.14)).corner_radius(4.0)
 }
 
+/// A tier to choose, in its colour, highlighted when it's the one chosen.
+pub fn tier_choice(ui: &mut Ui, quality: Quality, chosen: Quality) -> Response {
+    ui.add(egui::Button::selectable(quality == chosen, RichText::new(quality.name()).color(tier_color(quality))))
+}
+
 pub fn tier_color(quality: Quality) -> Color32 {
     match quality {
         Quality::Max => GOLD,
