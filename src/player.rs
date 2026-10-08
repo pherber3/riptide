@@ -145,6 +145,11 @@ struct Track {
     pending_seek: Option<f64>,
 }
 
+fn set_playing(status: &Status, output: &mut Output<Sink>, play: bool) {
+    status.playing.store(play, Relaxed);
+    if play { output.resume() } else { output.pause() }
+}
+
 fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) -> Result<()> {
     let consumer = Arc::new(Mutex::new(rtrb::RingBuffer::new(1).1));
     let open = |device: Option<String>| {
@@ -167,28 +172,31 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
         status.played.store((seconds * f64::from(rate)) as u64 * channels as u64, Relaxed);
         tx
     };
-    let seek = |t: &mut Track, seconds: f64, format: (u32, usize)| -> Result<()> {
-        if let Err(e) = t.decoder.seek(seconds) {
-            events(Event::Error(format!("seek failed: {e:#}")));
-        }
-        t.resampler = Resampler::new(t.decoder.info.sample_rate, format.0, format.1)?;
-        (t.tx, t.sent, t.ended, t.pending_seek) = (ring(seconds, format), 0, false, None);
-        t.ready.clear();
-        status.set_pending_seek(None);
-        Ok(())
-    };
-    // After the output moves to another rate or channel count, the track carries on from where it
-    // was heard.
-    let reformat = |track: &mut Option<Track>, at: f64, format: (u32, usize)| -> Result<()> {
-        status.samples_per_second.store(u64::from(format.0) * format.1 as u64, Relaxed);
-        let Some(t) = track else { return Ok(()) };
-        if t.decoder.can_seek() {
-            return seek(t, at, format);
-        }
+    // The track's sound starts over at `at`: resampled for the output's format, into an empty ring.
+    let restart = |t: &mut Track, at: f64, format: (u32, usize)| -> Result<()> {
         t.resampler = Resampler::new(t.decoder.info.sample_rate, format.0, format.1)?;
         (t.tx, t.sent) = (ring(at, format), 0);
         t.ready.clear();
         Ok(())
+    };
+    let seek = |t: &mut Track, seconds: f64, format: (u32, usize)| -> Result<()> {
+        if let Err(e) = t.decoder.seek(seconds) {
+            events(Event::Error(format!("seek failed: {e:#}")));
+        }
+        restart(t, seconds, format)?;
+        (t.ended, t.pending_seek) = (false, None);
+        status.set_pending_seek(None);
+        Ok(())
+    };
+    // After the output moves to another rate or channel count, the track carries on from where it
+    // was heard: by seeking there, or, while it is still downloading, from what is decoded next.
+    let reformat = |track: &mut Option<Track>, at: f64, format: (u32, usize)| -> Result<()> {
+        status.samples_per_second.store(u64::from(format.0) * format.1 as u64, Relaxed);
+        match track {
+            Some(t) if t.decoder.can_seek() => seek(t, at, format),
+            Some(t) => restart(t, at, format),
+            None => Ok(()),
+        }
     };
     let mut track: Option<Track> = None;
     loop {
@@ -223,14 +231,9 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
                     pending_seek: None,
                 });
                 status.set_pending_seek(None);
-                status.playing.store(play, Relaxed);
-                if play { output.resume() } else { output.pause() }
+                set_playing(&status, &mut output, play);
             }
-            Ok(Cmd::Toggle) if track.is_some() => {
-                let play = !status.playing.load(Relaxed);
-                status.playing.store(play, Relaxed);
-                if play { output.resume() } else { output.pause() }
-            }
+            Ok(Cmd::Toggle) if track.is_some() => set_playing(&status, &mut output, !status.playing.load(Relaxed)),
             Ok(Cmd::Seek(seconds)) => {
                 if let Some(t) = &mut track {
                     if t.decoder.can_seek() {
