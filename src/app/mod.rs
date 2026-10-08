@@ -151,7 +151,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let data = home.join("data");
         // The chosen theme is read now, so the first frame is already in its colours.
-        let file = settings.theme.as_ref().and_then(|name| std::fs::read_to_string(data.join("themes").join(name)).ok());
+        let file = settings.theme.as_ref().and_then(|name| std::fs::read_to_string(theme::folder(&data).join(name)).ok());
         theme::install(&ctx, file.and_then(|text| fastframe_theme::parse_palette(&text).ok()).unwrap_or(theme::DARK));
         let mut themes = fastframe_theme::Catalog::default();
         themes.enable_desktop_themes(fastframe_theme::DesktopThemes {
@@ -290,7 +290,7 @@ impl App {
     fn scan_themes(&mut self) {
         let ctx = self.ctx.clone();
         let waker = fastframe_theme::Waker::new(move || ctx.request_repaint());
-        self.themes.start(self.data.join("themes"), self.settings.theme.clone(), &waker);
+        self.themes.start(theme::folder(&self.data), self.settings.theme.clone(), &waker);
     }
 
     /// The chosen theme's colours, or Riptide's own.

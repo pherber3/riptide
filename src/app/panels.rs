@@ -440,8 +440,7 @@ impl App {
             };
             if self.settings_open {
                 let lastfm_user = self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.as_str());
-                let home = self.data.parent().unwrap_or(&self.data);
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::settings::page(ui, &mut self.settings, &self.themes, lastfm_user, home, actions));
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::settings::page(ui, &mut self.settings, &self.themes, lastfm_user, &self.data, actions));
                 return;
             }
             let Some(page) = &mut self.page else { return };

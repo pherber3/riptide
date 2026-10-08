@@ -172,9 +172,16 @@ fastframe_icons::icons! {
 }
 
 /// The app's logo at `size` pixels square, as RGBA: the window, taskbar and tray icon.
+/// Where the theme files are kept, in the data folder.
+pub fn folder(data: &std::path::Path) -> std::path::PathBuf {
+    data.join("themes")
+}
+
 pub fn logo(size: usize) -> Vec<u8> {
     let image = image::load_from_memory(include_bytes!("../assets/riptide.png")).expect("bundled icon");
-    image.resize_exact(size as u32, size as u32, image::imageops::FilterType::Lanczos3).to_rgba8().into_raw()
+    let size = size as u32;
+    let image = if image.width() == size { image } else { image.resize_exact(size, size, image::imageops::FilterType::Lanczos3) };
+    image.to_rgba8().into_raw()
 }
 
 pub fn install(ctx: &egui::Context, palette: Palette) {

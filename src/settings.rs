@@ -55,7 +55,7 @@ impl Settings {
 
 /// The settings page: one card per section, a row per setting with its control on the right. It
 /// edits `s` directly; quality goes through an action, since it reloads the playing track.
-pub fn page(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, home: &Path, actions: &mut Vec<Action>) {
+pub fn page(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, data: &Path, actions: &mut Vec<Action>) {
     // One column down the middle of the page, however wide the window.
     let width = ui.available_width().min(760.0);
     ui.horizontal(|ui| {
@@ -64,17 +64,17 @@ pub fn page(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_use
             ui.set_width(width);
             ui.add_space(12.0);
             ui.label(RichText::new("Settings").font(bold(32.0)).color(p().text));
-            cards(ui, s, themes, lastfm_user, home, actions);
+            cards(ui, s, themes, lastfm_user, data, actions);
             ui.add_space(24.0);
         });
     });
 }
 
-fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, home: &Path, actions: &mut Vec<Action>) {
+fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: Option<&str>, data: &Path, actions: &mut Vec<Action>) {
     card(ui, "Appearance", |ui| {
         row(ui, "Theme", "Copy a theme in its folder and edit the colours to make your own", |ui| {
             if ui.button("Open folder").clicked() {
-                let _ = open::that(home.join("data").join("themes"));
+                let _ = open::that(crate::theme::folder(data));
             }
             let shown = s.theme.as_deref().map_or("Riptide", fastframe_theme::display_name);
             egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(shown).show_ui(ui, |ui| {
@@ -132,6 +132,7 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
         row(ui, "Discord", "Show what you're listening to on your Discord profile while the Discord app is open", |ui| switch(ui, &mut s.discord));
     });
     card(ui, "About", |ui| {
+        let home = data.parent().unwrap_or(data);
         row(ui, concat!("Riptide ", env!("CARGO_PKG_VERSION")), &format!("Settings, sign-in and cache live in {}", home.display()), |ui| {
             if ui.button("Open folder").clicked() {
                 let _ = open::that(home);
