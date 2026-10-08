@@ -143,130 +143,139 @@ impl App {
         painter.galley(rect.min + vec2(10.0, 6.0), galley, p().text);
     }
 
+    /// The bar along the bottom: what is playing, the transport, and volume and quality.
     pub(super) fn player_bar(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
-        let status = self.player.status.clone();
-        let mut save = false;
         let frame = egui::Frame::new().fill(mood.map_or(p().panel, |c| c.lerp_to_gamma(Color32::BLACK, 0.25))).inner_margin(egui::Margin::symmetric(16, 0));
         egui::Panel::bottom("player").exact_size(84.0).frame(frame).show(ui, |ui| {
             let edge = ui.clip_rect();
             ui.painter().hline(edge.x_range(), edge.top(), egui::Stroke::new(1.0, p().outline));
             ui.columns(3, |cols| {
-                let track = self.queue.current();
-                cols[0].horizontal_centered(|ui| {
-                    let Some(t) = track else { return };
-                    let cover = picture(ui, tidal::image(t.cover.as_deref(), 160), 56.0, false);
-                    if cover.hovered() {
-                        ui.painter().rect_filled(cover.rect, 6.0, Color32::from_black_alpha(90));
-                    }
-                    let mut album = clickable(cover).clicked();
-                    ui.add_space(4.0);
-                    ui.vertical(|ui| {
-                        ui.set_max_width(ui.available_width() - 40.0);
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.add_space(if self.queue.from.is_some() { 14.0 } else { 23.0 });
-                        album |= link_text(ui, RichText::new(&t.title).font(semibold(14.0)).color(p().text)).clicked();
-                        link_to(ui, RichText::new(&t.artist).size(13.0), t.artist_id.map(Source::Artist), actions);
-                        // Where it is playing from, as in Tidal: a way back to that playlist or album.
-                        if let Some((source, name)) = &self.queue.from {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 5.0;
-                                let icon = match source {
-                                    Source::Album(_) => Icon::Disc,
-                                    Source::Artist(_) | Source::ArtistRadio(_) => Icon::Artists,
-                                    _ => Icon::Playlists,
-                                };
-                                ui.add(icon.image(p().secondary, 13.0));
-                                link_to(ui, RichText::new(name).size(12.0), Some(source.clone()), actions);
-                            });
-                        }
-                    });
-                    heart(ui, t.id, &self.library, true, actions);
-                    if album && let Some(id) = t.album_id {
-                        actions.push(Action::Open(Source::Album(id)));
-                    }
-                });
-                cols[1].vertical_centered(|ui| {
-                    ui.add_space(12.0);
-                    // A row as tall as the play button from the start, so every button centres on the same line.
-                    let row = Layout::left_to_right(Align::Center);
-                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), row, |ui| {
-                        ui.spacing_mut().item_spacing.x = 14.0;
-                        ui.add_space((ui.available_width() - 200.0) / 2.0);
-                        let on = |on: bool| if on { p().accent } else { p().secondary };
-                        let toggle = if status.playing.load(Relaxed) { Icon::Pause } else { Icon::Play };
-                        let repeat = if self.queue.repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat };
-                        let buttons = [
-                            (Icon::Shuffle, 16.0, on(self.queue.shuffled()), Action::Shuffle),
-                            (Icon::Prev, 18.0, p().text, Action::Prev),
-                            (toggle, 18.0, p().text, Action::Toggle),
-                            (Icon::Next, 18.0, p().text, Action::Next),
-                            (repeat, 16.0, on(self.queue.repeat != Repeat::Off), Action::Repeat),
-                        ];
-                        for (icon, size, color, action) in buttons {
-                            let response = if matches!(action, Action::Toggle) {
-                                let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
-                                play_disc(ui, rect.center(), 17.0, response.hovered(), icon);
-                                clickable(response)
-                            } else {
-                                icon_button(ui, icon, size, color)
-                            };
-                            if response.clicked() {
-                                actions.push(action);
-                            }
-                        }
-                    });
-                    let total = track.map_or(0.0, |t| f64::from(t.duration));
-                    let mut position = self.dragging.or(self.restored).unwrap_or_else(|| status.position()).min(total);
-                    ui.horizontal(|ui| {
-                        let time = |text: String| RichText::new(text).size(11.0).color(p().secondary);
-                        ui.label(time(clock(position)));
-                        let seek = bar(ui, &mut position, total, ui.available_width() - 40.0, track.is_some());
-                        if seek.dragged() {
-                            self.dragging = Some(position);
-                        }
-                        if seek.drag_stopped() || seek.clicked() {
-                            self.dragging = None;
-                            actions.push(Action::Seek(position));
-                        }
-                        ui.label(time(clock(total)));
-                    });
-                });
-                cols[2].with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let mut volume = f64::from(self.settings.volume);
-                    let slider = bar(ui, &mut volume, 1.0, 96.0, true);
-                    if slider.changed() {
-                        self.settings.volume = volume as f32;
-                        status.set_volume(self.settings.volume);
-                    }
-                    save = slider.drag_stopped() || slider.clicked();
-                    let muted = self.settings.volume == 0.0;
-                    if icon_button(ui, if muted { Icon::Muted } else { Icon::Volume }, 18.0, p().secondary).on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
-                        self.settings.volume = if muted { self.unmuted.take().unwrap_or(0.5) } else { self.unmuted = Some(self.settings.volume); 0.0 };
-                        status.set_volume(self.settings.volume);
-                        save = true;
-                    }
-                    ui.add_space(6.0);
-                    for (open, icon, hint, action) in [(self.queue_open, Icon::Queue, "Queue", Action::Queue), (self.lyrics_open, Icon::Lyrics, "Lyrics", Action::Lyrics)] {
-                        if icon_button(ui, icon, 18.0, if open { p().accent } else { p().secondary }).on_hover_text(hint).clicked() {
-                            actions.push(action);
-                        }
-                    }
-                    ui.add_space(6.0);
-                    let (tier, format) = status.format.lock().unwrap().clone();
-                    let (tier, format) = if track.is_some() { (tier, format) } else { (self.settings.quality, String::new()) };
-                    let color = tier_color(tier);
-                    let badge = egui::Button::new(RichText::new(tier.name().to_uppercase()).font(bold(11.0)).color(color)).fill(color.gamma_multiply(0.14)).corner_radius(4.0);
-                    egui::containers::menu::MenuButton::from_button(badge).ui(ui, |ui| {
-                        for q in Quality::ALL {
-                            if ui.radio(self.settings.quality == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
-                                actions.push(Action::Quality(q));
-                            }
-                        }
-                    });
-                    ui.label(RichText::new(format).size(11.0).color(mood.map_or(p().dim, |_| Color32::from_white_alpha(150))));
-                });
+                cols[0].horizontal_centered(|ui| self.playing_now(ui, actions));
+                cols[1].vertical_centered(|ui| self.transport(ui, actions));
+                cols[2].with_layout(Layout::right_to_left(Align::Center), |ui| self.output(ui, mood, actions));
             });
         });
+    }
+
+    /// The playing track's cover, title, artist and where it is playing from, each a link.
+    fn playing_now(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+            let Some(t) = self.queue.current() else { return };
+            let cover = picture(ui, tidal::image(t.cover.as_deref(), 160), 56.0, false);
+            if cover.hovered() {
+                ui.painter().rect_filled(cover.rect, 6.0, Color32::from_black_alpha(90));
+            }
+            let mut album = clickable(cover).clicked();
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(ui.available_width() - 40.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add_space(if self.queue.from.is_some() { 14.0 } else { 23.0 });
+                album |= link_text(ui, RichText::new(&t.title).font(semibold(14.0)).color(p().text)).clicked();
+                link_to(ui, RichText::new(&t.artist).size(13.0), t.artist_id.map(Source::Artist), actions);
+                // Where it is playing from, as in Tidal: a way back to that playlist or album.
+                if let Some((source, name)) = &self.queue.from {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let icon = match source {
+                            Source::Album(_) => Icon::Disc,
+                            Source::Artist(_) | Source::ArtistRadio(_) => Icon::Artists,
+                            _ => Icon::Playlists,
+                        };
+                        ui.add(icon.image(p().secondary, 13.0));
+                        link_to(ui, RichText::new(name).size(12.0), Some(source.clone()), actions);
+                    });
+                }
+            });
+            heart(ui, t.id, &self.library, true, actions);
+            if album && let Some(id) = t.album_id {
+                actions.push(Action::Open(Source::Album(id)));
+            }
+    }
+
+    /// Shuffle, previous, play, next and repeat, over the seek bar.
+    fn transport(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let status = self.player.status.clone();
+            ui.add_space(12.0);
+            // A row as tall as the play button from the start, so every button centres on the same line.
+            let row = Layout::left_to_right(Align::Center);
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), row, |ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.add_space((ui.available_width() - 200.0) / 2.0);
+                let on = |on: bool| if on { p().accent } else { p().secondary };
+                let toggle = if status.playing.load(Relaxed) { Icon::Pause } else { Icon::Play };
+                let repeat = if self.queue.repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat };
+                let buttons = [
+                    (Icon::Shuffle, 16.0, on(self.queue.shuffled()), Action::Shuffle),
+                    (Icon::Prev, 18.0, p().text, Action::Prev),
+                    (toggle, 18.0, p().text, Action::Toggle),
+                    (Icon::Next, 18.0, p().text, Action::Next),
+                    (repeat, 16.0, on(self.queue.repeat != Repeat::Off), Action::Repeat),
+                ];
+                for (icon, size, color, action) in buttons {
+                    let response = if matches!(action, Action::Toggle) {
+                        let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+                        play_disc(ui, rect.center(), 17.0, response.hovered(), icon);
+                        clickable(response)
+                    } else {
+                        icon_button(ui, icon, size, color)
+                    };
+                    if response.clicked() {
+                        actions.push(action);
+                    }
+                }
+            });
+            let total = self.queue.current().map_or(0.0, |t| f64::from(t.duration));
+            let mut position = self.dragging.or(self.restored).unwrap_or_else(|| status.position()).min(total);
+            ui.horizontal(|ui| {
+                let time = |text: String| RichText::new(text).size(11.0).color(p().secondary);
+                ui.label(time(clock(position)));
+                let seek = bar(ui, &mut position, total, ui.available_width() - 40.0, self.queue.current().is_some());
+                if seek.dragged() {
+                    self.dragging = Some(position);
+                }
+                if seek.drag_stopped() || seek.clicked() {
+                    self.dragging = None;
+                    actions.push(Action::Seek(position));
+                }
+                ui.label(time(clock(total)));
+            });
+    }
+
+    /// Volume, the queue and lyrics buttons, and the quality playing and chosen.
+    fn output(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
+        let status = self.player.status.clone();
+            let mut volume = f64::from(self.settings.volume);
+            let slider = bar(ui, &mut volume, 1.0, 96.0, true);
+            if slider.changed() {
+                self.settings.volume = volume as f32;
+                status.set_volume(self.settings.volume);
+            }
+            let mut save = slider.drag_stopped() || slider.clicked();
+            let muted = self.settings.volume == 0.0;
+            if icon_button(ui, if muted { Icon::Muted } else { Icon::Volume }, 18.0, p().secondary).on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
+                self.settings.volume = if muted { self.unmuted.take().unwrap_or(0.5) } else { self.unmuted = Some(self.settings.volume); 0.0 };
+                status.set_volume(self.settings.volume);
+                save = true;
+            }
+            ui.add_space(6.0);
+            for (open, icon, hint, action) in [(self.queue_open, Icon::Queue, "Queue", Action::Queue), (self.lyrics_open, Icon::Lyrics, "Lyrics", Action::Lyrics)] {
+                if icon_button(ui, icon, 18.0, if open { p().accent } else { p().secondary }).on_hover_text(hint).clicked() {
+                    actions.push(action);
+                }
+            }
+            ui.add_space(6.0);
+            let (tier, format) = status.format.lock().unwrap().clone();
+            let (tier, format) = if self.queue.current().is_some() { (tier, format) } else { (self.settings.quality, String::new()) };
+            let color = tier_color(tier);
+            let badge = egui::Button::new(RichText::new(tier.name().to_uppercase()).font(bold(11.0)).color(color)).fill(color.gamma_multiply(0.14)).corner_radius(4.0);
+            egui::containers::menu::MenuButton::from_button(badge).ui(ui, |ui| {
+                for q in Quality::ALL {
+                    if ui.radio(self.settings.quality == q, RichText::new(q.name()).color(tier_color(q))).clicked() {
+                        actions.push(Action::Quality(q));
+                    }
+                }
+            });
+            ui.label(RichText::new(format).size(11.0).color(mood.map_or(p().dim, |_| Color32::from_white_alpha(150))));
         if save {
             self.settings.save(&self.data);
         }
