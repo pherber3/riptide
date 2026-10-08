@@ -630,13 +630,15 @@ impl Rows<'_> {
             let left = ui.cursor().left();
             ui.painter().hline(left..=left + full, ui.cursor().top(), Stroke::new(1.0, p().outline));
             ui.add_space(6.0);
-            for (pos, t) in ordered(tracks, order).enumerate() {
+            // Only the rows in view are drawn; the rest take up their space in one block above and
+            // one below, so a long playlist costs no more to draw than a short one.
+            let count = order.map_or(tracks.len(), <[usize]>::len);
+            let (top, view) = (ui.cursor().top(), ui.clip_rect());
+            let row_at = |y: f32| (((y - top) / height).max(0.0) as usize).min(count);
+            let (first, end) = (row_at(view.top()), (row_at(view.bottom()) + 1).min(count));
+            ui.allocate_space(vec2(free, first as f32 * height));
+            for (pos, t) in ordered(tracks, order).enumerate().take(end).skip(first) {
                 let rect = Rect::from_min_size(ui.cursor().min, vec2(full, height));
-                // Rows scrolled out of view only take up space, so long playlists stay cheap to draw.
-                if !ui.is_rect_visible(rect) {
-                    ui.allocate_space(vec2(free, height));
-                    continue;
-                }
                 let i = order.map_or(pos, |o| o[pos]);
                 let play = || match self.list {
                     List::Queue => Action::Jump(i),
@@ -693,6 +695,7 @@ impl Rows<'_> {
                 }
                 egui::Popup::context_menu(&row).close_behavior(KEEP_OPEN).show(|ui| self.menu(ui, tracks, i, actions));
             }
+            ui.allocate_space(vec2(free, (count - end) as f32 * height));
         });
     }
 
