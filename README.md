@@ -73,6 +73,14 @@ Scrobbling uses your own Last.fm API account, which takes a minute to set up:
 3. In Riptide, open **Settings → Connections → Last.fm → Connect** and approve it in the page that
    opens.
 
+## Discord
+
+Turn on **Settings → Connections → Discord** to show what you're playing on your Discord profile:
+the track, artist, cover and a progress bar, under "Listening to Riptide", with an **Open in
+Tidal** button for anyone who wants to hear it. It goes through the Discord desktop app on the same
+computer, so it needs that app running, and nothing is sent anywhere else. Pausing clears it. It's
+off until you turn it on.
+
 ## Where things are kept
 
 | | Data (sign-in, settings, queue, themes) | Cache |
