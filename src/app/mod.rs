@@ -44,6 +44,9 @@ fn then(update: impl FnOnce(&mut App) + Send + 'static) -> Update {
 
 pub enum Action {
     Open(Source),
+    /// Open a page in place of the one showing, without a history entry: another edition of the
+    /// same album, or results that refine the search showing.
+    Replace(Source),
     Play(Source),
     /// Play these tracks from `index`, or shuffled (true) with that one first.
     PlayTracks(Vec<Track>, usize, bool),
@@ -346,13 +349,12 @@ impl App {
     }
 
     /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
-    fn show(&mut self, mut page: Page) {
+    /// Shows a page, in its kind's remembered sort. The page it replaces goes into history, unless
+    /// `replace` says not to, or the new page is a fresh copy of it.
+    fn show(&mut self, mut page: Page, replace: bool) {
         page.view = page.source.sort_key().map(|key| View::new(key, self.settings.sorts.get(key).copied().unwrap_or_default()));
-        // The page showing, opened again, is refreshed in place; results that refine the ones showing
-        // replace them, so typing doesn't fill the history.
         let same = self.page.as_ref().is_some_and(|p| p.source == page.source);
-        let refining = matches!((&page.source, self.page.as_ref().map(|p| &p.source)), (Source::Search(_), Some(Source::Search(_))));
-        self.history.open(&mut self.page, page, same || refining);
+        self.history.open(&mut self.page, page, same || replace);
         // A page opened from the settings takes their place.
         (self.loading, self.settings_open) = (false, false);
     }
@@ -377,44 +379,55 @@ impl App {
         }
         self.search_due = None;
         let query = self.query.trim().to_string();
-        if !query.is_empty() && !matches!(self.page.as_ref().map(|p| &p.source), Some(Source::Search(q)) if *q == query) {
-            self.apply(Action::Open(Source::Search(query)));
+        // Results that refine the ones showing replace them, so typing doesn't fill the history.
+        let searching = self.page.as_ref().map(|p| &p.source);
+        if !query.is_empty() && !matches!(searching, Some(Source::Search(q)) if *q == query) {
+            let refine = matches!(searching, Some(Source::Search(_)));
+            self.apply(if refine { Action::Replace(Source::Search(query)) } else { Action::Open(Source::Search(query)) });
         }
+    }
+
+    /// Opens a page (see `Action::Open` and `Action::Replace`). A page kept from last time shows
+    /// at once and is only fetched again once it's stale; opening the page showing fetches it again.
+    fn open(&mut self, tidal: Tidal, source: Source, replace: bool) {
+        (self.loading, self.message, self.lyrics_open) = (true, None, false);
+        let showing = self.page.as_ref().map(|p| p.source.clone());
+        let kept = if showing.as_ref() == Some(&source) { None } else { self.kept.get(&source) };
+        // What must still be showing when the page arrives for it to go in: the page it refreshes or
+        // replaces. Search results are checked against what's typed instead.
+        let must_show = match &source {
+            Source::Search(_) => None,
+            _ if showing.as_ref() == Some(&source) || kept.is_some() => Some(source.clone()),
+            _ if replace => showing,
+            _ => None,
+        };
+        if let Some((page, fresh)) = kept {
+            self.show(page, replace);
+            if fresh {
+                return;
+            }
+            self.loading = true;
+        }
+        self.spawn(async move {
+            let page = load(tidal, source).await?;
+            Ok(then(move |app| {
+                app.kept.keep(&page);
+                let moved_on = must_show.is_some_and(|must| app.page.as_ref().is_none_or(|p| p.source != must));
+                let stale_search = matches!(&page.source, Source::Search(q) if *q != app.query.trim());
+                if moved_on {
+                    app.loading = false;
+                } else if !stale_search {
+                    app.show(page, replace);
+                }
+            }))
+        });
     }
 
     fn apply(&mut self, action: Action) {
         let Some(tidal) = self.tidal.clone() else { return };
         match action {
-            Action::Open(source) => {
-                (self.loading, self.message, self.lyrics_open) = (true, None, false);
-                // A page kept from last time shows at once, and is only fetched again once it's
-                // stale. Opening the page showing fetches it again. Either way the new copy replaces
-                // the one showing, if that is still the page showing when it arrives.
-                let showing = self.page.as_ref().is_some_and(|p| p.source == source);
-                let kept = if showing { None } else { self.kept.get(&source) };
-                let in_place = showing || kept.is_some();
-                if let Some((page, fresh)) = kept {
-                    self.show(page);
-                    if fresh {
-                        return;
-                    }
-                    self.loading = true;
-                }
-                self.spawn(async move {
-                    let page = load(tidal, source).await?;
-                    Ok(then(move |app| {
-                        // Results for an older query than the one typed now are dropped.
-                        let stale_search = matches!(&page.source, Source::Search(q) if *q != app.query.trim());
-                        app.kept.keep(&page);
-                        let left = in_place && app.page.as_ref().is_none_or(|p| p.source != page.source);
-                        if left {
-                            app.loading = false;
-                        } else if !stale_search {
-                            app.show(page);
-                        }
-                    }))
-                });
-            }
+            Action::Open(source) => self.open(tidal, source, false),
+            Action::Replace(source) => self.open(tidal, source, true),
             Action::Play(source) => self.spawn(async move {
                 let page = load(tidal, source).await?;
                 let from = page.origin();

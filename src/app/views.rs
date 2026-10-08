@@ -125,7 +125,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 egui::containers::menu::MenuButton::from_button(versions).ui(ui, |ui| {
                     for (edition, to) in &editions.others {
                         let name = RichText::new(edition.name(editions.explicit_varies)).color(tier_color(edition.quality));
-                        menu_item(ui, actions, name, Action::Open(to.clone()));
+                        menu_item(ui, actions, name, Action::Replace(to.clone()));
                     }
                 });
             }
