@@ -30,13 +30,13 @@ impl App {
         let evicting = dir.clone();
         self.rt.spawn_blocking(move || cache::evict(&evicting, crate::CACHE_BYTES));
         self.spawn(async move {
-            let reader = cache::track(&tidal, &dir, id, quality).await?;
+            let reader = crate::stream::track(&tidal, &dir, id, quality).await?;
             // Download the next track once this one is in, so it starts instantly without slowing this one.
             if let Some(next) = next {
                 let download = reader.download();
                 tokio::spawn(async move {
                     download.finished().await;
-                    cache::track(&tidal, &dir, next, quality).await
+                    crate::stream::track(&tidal, &dir, next, quality).await
                 });
             }
             // Opening reads the stream's first bytes, so it happens here rather than on the audio thread.

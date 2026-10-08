@@ -11,6 +11,7 @@ mod lastfm;
 mod player;
 mod queue;
 mod settings;
+mod stream;
 mod theme;
 mod tidal;
 mod view;
@@ -83,7 +84,7 @@ fn main() -> Result<()> {
             cache::evict(&cache_dir, CACHE_BYTES)?;
             let rt = tokio::runtime::Runtime::new()?;
             let tidal = rt.block_on(Tidal::load(&session))?;
-            let reader = rt.block_on(cache::track(&tidal, &cache_dir, id.parse()?, quality))?;
+            let reader = rt.block_on(stream::track(&tidal, &cache_dir, id.parse()?, quality))?;
             let (tx, rx) = channel();
             let player = Player::start(None, move |e| {
                 let _ = tx.send(e);
