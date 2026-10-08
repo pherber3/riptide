@@ -56,13 +56,10 @@ impl App {
         let frame = egui::Frame::new().fill(p().panel).inner_margin(egui::Margin { left: 12, right: 12, top: 20, bottom: 8 });
         egui::Panel::left("nav").exact_size(232.0).frame(frame).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
+            // The small capitals over each group of links.
             let heading = |ui: &mut Ui, text: &str| {
-                ui.add_space(22.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new(text).font(semibold(11.0)).color(p().dim));
-                });
-                ui.add_space(4.0);
+                ui.add_space(10.0);
+                ui.label(RichText::new(text).font(semibold(11.0)).color(p().dim));
             };
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
@@ -78,7 +75,9 @@ impl App {
                     actions.push(action);
                 }
             }
-            heading(ui, "COLLECTION");
+            ui.add_space(22.0);
+            ui.horizontal(|ui| heading(ui, "COLLECTION"));
+            ui.add_space(4.0);
             for (icon, text, source) in [(Icon::Music, "Tracks", Source::Tracks), (Icon::Disc, "Albums", Source::Albums), (Icon::Artists, "Artists", Source::Artists), (Icon::Playlists, "Playlists", Source::playlists())] {
                 if nav_item(ui, icon, text, open == Some(&source)).clicked() {
                     actions.push(Action::Open(source));
@@ -87,10 +86,7 @@ impl App {
             ui.add_space(22.0);
             egui::Sides::new().show(
                 ui,
-                |ui| {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("PLAYLISTS").font(semibold(11.0)).color(p().dim));
-                },
+                |ui| heading(ui, "PLAYLISTS"),
                 |ui| {
                     let plus = egui::Button::image(Icon::Plus.image(p().secondary, 16.0)).frame(false);
                     egui::containers::menu::MenuButton::from_button(plus).ui(ui, |ui| {
@@ -289,7 +285,7 @@ impl App {
         let frame = egui::Frame::new().fill(p().panel).inner_margin(egui::Margin::symmetric(20, 0));
         egui::Panel::right("side").default_size(420.0).resizable(true).frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                section(ui, "Queue");
+                section(ui, "Queue", |_| {});
                 if self.queue.tracks.is_empty() {
                     ui.label(RichText::new("Nothing queued. Right-click a track to add it.").color(p().secondary));
                 }

@@ -141,7 +141,7 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
 }
 
 fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
-    section(ui, title);
+    section(ui, title, |_| {});
     egui::Frame::new().fill(p().surface).corner_radius(10).inner_margin(egui::Margin::symmetric(20, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui);

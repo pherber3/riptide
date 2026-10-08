@@ -33,10 +33,19 @@ pub fn clock(seconds: f64) -> String {
     }
 }
 
-pub fn section(ui: &mut Ui, title: &str) {
+/// A section's title, with whatever `aside` adds at its right.
+pub fn section(ui: &mut Ui, title: &str, aside: impl FnOnce(&mut Ui)) {
     ui.add_space(28.0);
-    ui.label(RichText::new(title).font(bold(22.0)).color(p().text));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(bold(22.0)).color(p().text));
+        ui.with_layout(Layout::right_to_left(Align::Center), aside);
+    });
     ui.add_space(10.0);
+}
+
+/// Text laid out on one line no wider than `width`, cut short with an ellipsis, to paint.
+fn fitted(ui: &Ui, text: impl Into<egui::WidgetText>, width: f32) -> std::sync::Arc<egui::Galley> {
+    text.into().into_galley(ui, Some(egui::TextWrapMode::Truncate), width, egui::TextStyle::Body)
 }
 
 pub fn clickable(response: Response) -> Response {
@@ -121,8 +130,7 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response
     }
     let color = if selected || hovered { p().text } else { p().secondary };
     icon.image(color, 18.0).paint_at(ui, Rect::from_min_size(rect.left_center() + vec2(10.0, -9.0), Vec2::splat(18.0)));
-    let text = egui::WidgetText::from(RichText::new(text).font(medium(14.0)));
-    let galley = text.into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width() - 48.0, egui::TextStyle::Body);
+    let galley = fitted(ui, RichText::new(text).font(medium(14.0)), rect.width() - 48.0);
     ui.painter().galley(pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0), galley, color);
     clickable(response)
 }
@@ -265,9 +273,8 @@ fn card(ui: &mut Ui, card: &Card, actions: &mut Vec<Action>) {
     if let Card::Folder { .. } = card {
         Icon::Folder.image(p().dim, 56.0).paint_at(ui, Rect::from_center_size(cover.center(), Vec2::splat(56.0)));
     }
-    let line = |text: RichText| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), CARD, egui::TextStyle::Body);
-    painter.galley(cover.left_bottom() + vec2(0.0, 8.0), line(RichText::new(title).font(semibold(14.0))), p().text);
-    painter.galley(cover.left_bottom() + vec2(0.0, 27.0), line(RichText::new(subtitle).size(13.0)), p().secondary);
+    painter.galley(cover.left_bottom() + vec2(0.0, 8.0), fitted(ui, RichText::new(title).font(semibold(14.0)), CARD), p().text);
+    painter.galley(cover.left_bottom() + vec2(0.0, 27.0), fitted(ui, RichText::new(subtitle).size(13.0), CARD), p().secondary);
     let play = Source::play(card);
     let button = cover.right_bottom() - vec2(30.0, 30.0);
     let on_button = play.is_some() && response.hover_pos().is_some_and(|p| p.distance(button) <= 20.0);
@@ -347,7 +354,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 ]
                 .into_iter()
                 .flatten()
-                .map(|text| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), width, egui::TextStyle::Body))
+                .map(|text| fitted(ui, text, width))
                 .collect();
                 let gap = 8.0;
                 let height = lines.iter().map(|line| line.size().y + gap).sum::<f32>() - gap;
@@ -531,18 +538,13 @@ fn shelf_title(ui: &mut Ui, title: &str, more: Option<&str>, actions: &mut Vec<A
     if title.is_empty() && more.is_none() {
         return ui.add_space(16.0);
     }
-    ui.add_space(28.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).font(bold(22.0)).color(p().text));
-        if let Some(more) = more {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if link_text(ui, RichText::new("View all").font(semibold(13.0)).color(p().secondary)).clicked() {
-                    actions.push(Action::Open(Source::Page(more.into())));
-                }
-            });
+    section(ui, title, |ui| {
+        if let Some(more) = more
+            && link_text(ui, RichText::new("View all").font(semibold(13.0)).color(p().secondary)).clicked()
+        {
+            actions.push(Action::Open(Source::Page(more.into())));
         }
     });
-    ui.add_space(10.0);
 }
 
 /// A rounded link to another page, such as a genre.
