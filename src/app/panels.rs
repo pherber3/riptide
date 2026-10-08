@@ -409,8 +409,8 @@ impl App {
             let tint = cover.and_then(crate::art::tint);
             let full = ui.clip_rect();
             ui.horizontal(|ui| {
-                let back = self.settings_open || !self.back.is_empty();
-                for (icon, enabled, back) in [(Icon::Back, back, true), (Icon::Forward, !self.forward.is_empty(), false)] {
+                let back = self.settings_open || self.history.can_step(true);
+                for (icon, enabled, back) in [(Icon::Back, back, true), (Icon::Forward, self.history.can_step(false), false)] {
                     if ui.add_enabled_ui(enabled, |ui| icon_button(ui, icon, 20.0, p().secondary)).inner.clicked() {
                         actions.push(Action::Step(back));
                     }

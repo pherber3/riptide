@@ -117,6 +117,41 @@ impl Page {
     }
 }
 
+/// The pages behind and ahead of the one showing, as in a browser.
+#[derive(Default)]
+pub struct History {
+    back: Vec<Page>,
+    forward: Vec<Page>,
+}
+
+impl History {
+    const MAX: usize = 30;
+
+    /// Puts `page` in place of the one showing, which goes behind it unless the new page only
+    /// refreshes it. Whatever was ahead is gone.
+    pub fn open(&mut self, showing: &mut Option<Page>, page: Page, in_place: bool) {
+        if let Some(old) = showing.replace(page).filter(|_| !in_place) {
+            self.back.push(old);
+            if self.back.len() > Self::MAX {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
+
+    /// Swaps the page showing for the one behind it (or ahead).
+    pub fn step(&mut self, showing: &mut Option<Page>, back: bool) {
+        let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
+        if let Some(page) = from.pop() {
+            to.extend(showing.replace(page));
+        }
+    }
+
+    pub fn can_step(&self, back: bool) -> bool {
+        !if back { &self.back } else { &self.forward }.is_empty()
+    }
+}
+
 /// Loads any page. Playing a source loads its page too and plays the page's tracks.
 pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
     let tracks = |tracks, album_column| Body::Tracks { tracks, album_column };

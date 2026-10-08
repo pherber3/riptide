@@ -29,9 +29,8 @@ use crate::settings::Settings;
 use crate::theme;
 use crate::tidal::{self, Item, Lyrics, Quality, Tidal, Track};
 use crate::view::{Sort, View};
-use page::load;
+use page::{History, load};
 
-const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
 const SEARCH_PAUSE: f64 = 0.25;
 
@@ -110,8 +109,7 @@ pub struct App {
     /// The track and playback state last given to the media controls.
     shown: (Option<u64>, np::Playback),
     page: Option<Page>,
-    back: Vec<Page>,
-    forward: Vec<Page>,
+    history: History,
     loading: bool,
     query: String,
     /// When to search for what's being typed (egui time), once typing pauses.
@@ -207,8 +205,7 @@ impl App {
             controls,
             shown: (None, np::Playback::Stopped),
             page: None,
-            back: Vec::new(),
-            forward: Vec::new(),
+            history: History::default(),
             loading: true,
             query: String::new(),
             search_due: None,
@@ -341,25 +338,14 @@ impl App {
         // replace them, so typing doesn't fill the history.
         let same = self.page.as_ref().is_some_and(|p| p.source == page.source);
         let refining = matches!((&page.source, self.page.as_ref().map(|p| &p.source)), (Source::Search(_), Some(Source::Search(_))));
-        if same || refining {
-            self.page = Some(page);
-        } else if let Some(old) = self.page.replace(page) {
-            self.back.push(old);
-            if self.back.len() > HISTORY {
-                self.back.remove(0);
-            }
-        }
-        self.forward.clear();
+        self.history.open(&mut self.page, page, same || refining);
         // A page opened from the settings takes their place.
         (self.loading, self.settings_open) = (false, false);
     }
 
     /// Steps through history like a browser.
     fn step(&mut self, back: bool) {
-        let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
-        if let Some(page) = from.pop() {
-            to.extend(self.page.replace(page));
-        }
+        self.history.step(&mut self.page, back);
     }
 
     /// What reopening restores: settings, window, queue and position.
