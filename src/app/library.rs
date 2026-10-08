@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use super::{Action, App, Body, Page, Source};
 use crate::dialogs::{PlaylistForm, Target};
-use crate::tidal::{Card, Item, Playlist, ROOT, Tidal, Track};
+use crate::tidal::{Card, Entry, Item, Playlist, ROOT, Tidal, Track};
 
 /// The user's collection as the app shows it: what is saved, the sidebar's folders, and the
 /// playlists they made (the ones they can change).
@@ -80,12 +80,12 @@ impl App {
                 }
                 self.run(async move { tidal.move_in_playlist(&id, from, to).await });
             }
-            Action::MovePlaylist(id, folder) => self.changed(async move { tidal.arrange("move", &format!("playlist:{id}"), Some(&folder)).await }, None, in_folder),
+            Action::MovePlaylist(id, folder) => self.changed(async move { tidal.move_entry(Entry::Playlist(&id), &folder).await }, None, in_folder),
             Action::DeletePlaylist(id) => {
                 if self.open_playlist(&id).is_some() {
                     self.step(true);
                 }
-                self.changed(async move { tidal.arrange("remove", &format!("playlist:{id}"), None).await }, Some("Playlist deleted".into()), in_folder);
+                self.changed(async move { tidal.remove_entry(Entry::Playlist(&id)).await }, Some("Playlist deleted".into()), in_folder);
             }
             Action::DeleteFolder(id) => self.changed(async move { tidal.delete_folder(&id).await }, Some("Folder deleted".into()), in_folder),
             _ => {}

@@ -203,8 +203,8 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             };
             (Head::title(title), body)
         }
-        Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.radio("tracks", *id).await?, true)),
-        Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.radio("artists", *id).await?, true)),
+        Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.track_radio(*id).await?, true)),
+        Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.artist_radio(*id).await?, true)),
     };
     Ok(Page { source, head, body, view: None })
 }

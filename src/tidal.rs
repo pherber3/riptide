@@ -124,6 +124,21 @@ pub struct Mix {
     pub image: Option<String>,
 }
 
+/// A playlist or folder among the user's playlist folders, by id.
+pub enum Entry<'a> {
+    Playlist(&'a str),
+    Folder(&'a str),
+}
+
+impl Entry<'_> {
+    fn trn(&self) -> String {
+        match self {
+            Self::Playlist(id) => format!("trn:playlist:{id}"),
+            Self::Folder(id) => format!("trn:folder:{id}"),
+        }
+    }
+}
+
 /// Something the user can save to their collection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Item {
@@ -504,8 +519,17 @@ impl Tidal {
         self.items(&format!("{V1}/mixes/{id}/items"), &[], 1000, track).await
     }
 
-    /// Tracks like this one ("tracks") or this artist's ("artists"), for radio.
-    pub async fn radio(&self, kind: &str, id: u64) -> Result<Vec<Track>> {
+    /// Tracks like this one, for radio.
+    pub async fn track_radio(&self, id: u64) -> Result<Vec<Track>> {
+        self.radio("tracks", id).await
+    }
+
+    /// Tracks like this artist's, for radio.
+    pub async fn artist_radio(&self, id: u64) -> Result<Vec<Track>> {
+        self.radio("artists", id).await
+    }
+
+    async fn radio(&self, kind: &str, id: u64) -> Result<Vec<Track>> {
         Ok(list(&self.get(&format!("{V1}/{kind}/{id}/radio"), &[("limit", "100")]).await?["items"], track))
     }
 
@@ -612,13 +636,14 @@ impl Tidal {
         Ok(())
     }
 
-    /// Changes the user's playlist folders: `remove` (a playlist the user made is deleted) or
-    /// `move` into a folder ("root" is the top level). `item` is `playlist:<id>` or `folder:<id>`.
-    pub async fn arrange(&self, action: &str, item: &str, folder: Option<&str>) -> Result<()> {
-        let trn = format!("trn:{item}");
-        let mut query = vec![("trns", trn.as_str())];
-        query.extend(folder.map(|f| ("folderId", f)));
-        self.folders(action, &query).await.map(drop)
+    /// Moves a playlist or folder into a folder (`ROOT` is the top level).
+    pub async fn move_entry(&self, entry: Entry<'_>, folder: &str) -> Result<()> {
+        self.folders("move", &[("trns", &entry.trn()), ("folderId", folder)]).await.map(drop)
+    }
+
+    /// Takes a playlist or folder out of the user's folders; a playlist the user made is deleted.
+    pub async fn remove_entry(&self, entry: Entry<'_>) -> Result<()> {
+        self.folders("remove", &[("trns", &entry.trn())]).await.map(drop)
     }
 
     /// One of the playlist-folder calls (create, rename, move, remove), all PUTs on v2.
@@ -641,15 +666,14 @@ impl Tidal {
 
     /// Deletes a folder, first moving what is in it to the top level so no playlist goes with it.
     pub async fn delete_folder(&self, id: &str) -> Result<()> {
-        for card in self.folder(id).await? {
-            let item = match card {
-                Card::Playlist(p) => format!("playlist:{}", p.id),
-                Card::Folder { id, .. } => format!("folder:{id}"),
-                _ => continue,
-            };
-            self.arrange("move", &item, Some(ROOT)).await?;
-        }
-        self.arrange("remove", &format!("folder:{id}"), None).await
+        let cards = self.folder(id).await?;
+        let moves = cards.iter().filter_map(|card| match card {
+            Card::Playlist(p) => Some(self.move_entry(Entry::Playlist(&p.id), ROOT)),
+            Card::Folder { id, .. } => Some(self.move_entry(Entry::Folder(id), ROOT)),
+            _ => None,
+        });
+        futures_util::future::try_join_all(moves).await?;
+        self.remove_entry(Entry::Folder(id)).await
     }
 
     /// Everything saved to the collection: tracks, albums, artists and playlists.

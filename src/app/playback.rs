@@ -115,7 +115,7 @@ impl App {
         match (self.queue.after(), self.queue.current().map(|t| t.id), self.tidal.clone()) {
             (Some(i), ..) => self.play(i),
             (None, Some(id), Some(tidal)) if !radio => self.spawn(async move {
-                let radio = tidal.radio("tracks", id).await?;
+                let radio = tidal.track_radio(id).await?;
                 Ok(then(move |app| {
                     if app.queue.current().is_some_and(|t| t.id == id) {
                         match app.queue.extend_new(radio) {
