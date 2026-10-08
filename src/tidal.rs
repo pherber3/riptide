@@ -370,18 +370,19 @@ impl Tidal {
     /// Every item of a paged list (v1 or v2), up to `max`: the first page, then the rest a few at a
     /// time, each parsed as it arrives so a long list never sits in memory as raw JSON.
     async fn items<T>(&self, url: &str, query: &[(&str, &str)], max: usize, parse: impl Fn(&Value) -> Option<T>) -> Result<Vec<T>> {
-        const PAGE: usize = 50;
-        let parse = &parse;
+        // v1 lists take pages of up to 100, v2's of 50.
+        let size: usize = if url.starts_with(V2) { 50 } else { 100 };
+        let (parse, limit) = (&parse, &size.to_string());
         let page = |offset: usize| async move {
             let offset = offset.to_string();
-            let mut paged = vec![("limit", "50"), ("offset", offset.as_str())];
+            let mut paged = vec![("limit", limit.as_str()), ("offset", offset.as_str())];
             paged.extend_from_slice(query);
             let v = self.get(url, &paged).await?;
             let items = list(&v["items"], parse);
             anyhow::Ok((v["totalNumberOfItems"].as_u64().unwrap_or(0) as usize, items))
         };
         let (total, mut items) = page(0).await?;
-        let rest: Vec<_> = stream::iter((PAGE..total.min(max)).step_by(PAGE)).map(page).buffered(6).try_collect().await?;
+        let rest: Vec<_> = stream::iter((size..total.min(max)).step_by(size)).map(page).buffered(6).try_collect().await?;
         items.extend(rest.into_iter().flat_map(|(_, items)| items));
         items.truncate(max);
         Ok(items)
