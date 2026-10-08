@@ -28,7 +28,7 @@ use crate::player::{Cmd, Player};
 use crate::queue::Queue;
 use crate::settings::Settings;
 use crate::theme;
-use crate::tidal::{self, Item, Lyrics, Quality, Tidal, Track};
+use crate::tidal::{self, Item, Lyrics, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use page::{History, load};
 
@@ -111,6 +111,8 @@ pub struct App {
     shown: (Option<u64>, np::Playback),
     page: Option<Page>,
     history: History,
+    /// Home as it was last loaded, to show at once when it is opened again.
+    home: Option<Vec<Shelf>>,
     loading: bool,
     query: String,
     /// When to search for what's being typed (egui time), once typing pauses.
@@ -207,6 +209,7 @@ impl App {
             shown: (None, np::Playback::Stopped),
             page: None,
             history: History::default(),
+            home: None,
             loading: true,
             query: String::new(),
             search_due: None,
@@ -345,6 +348,9 @@ impl App {
 
     /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
     fn show(&mut self, mut page: Page) {
+        if let (Source::Home, Body::Shelves(shelves)) = (&page.source, &page.body) {
+            self.home = Some(shelves.clone());
+        }
         page.view = page.source.sort_key().map(|key| View::new(key, self.settings.sorts.get(key).copied().unwrap_or_default()));
         // The page showing, opened again, is refreshed in place; results that refine the ones showing
         // replace them, so typing doesn't fill the history.
@@ -385,11 +391,22 @@ impl App {
         match action {
             Action::Open(source) => {
                 (self.loading, self.message, self.lyrics_open) = (true, None, false);
+                // Home shows at once as it was last time, then the fresh one replaces it, if it is
+                // still showing by then.
+                let refresh = source == Source::Home && self.home.is_some();
+                if let Some(shelves) = self.home.clone().filter(|_| refresh) {
+                    self.show(Page { source: Source::Home, head: None, body: Body::Shelves(shelves), view: None });
+                    self.loading = true;
+                }
                 self.spawn(async move {
                     let page = load(tidal, source).await?;
-                    // Results for an older query than the one typed now are dropped.
                     Ok(then(move |app| {
-                        if !matches!(&page.source, Source::Search(q) if *q != app.query.trim()) {
+                        // Results for an older query than the one typed now are dropped.
+                        let stale_search = matches!(&page.source, Source::Search(q) if *q != app.query.trim());
+                        let left_home = refresh && app.page.as_ref().is_none_or(|p| p.source != Source::Home);
+                        if left_home {
+                            app.loading = false;
+                        } else if !stale_search {
                             app.show(page);
                         }
                     }))
