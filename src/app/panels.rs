@@ -210,11 +210,14 @@ impl App {
             let on = |on: bool| if on { p().accent } else { p().secondary };
             let toggle = if status.playing.load(Relaxed) { Icon::Pause } else { Icon::Play };
             let repeat = if self.queue.repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat };
+            // Previous and next sit a little below full brightness, so they light up on hover like
+            // every other button.
+            let skip = p().secondary.lerp_to_gamma(p().text, 0.5);
             let buttons = [
                 (Icon::Shuffle, 16.0, on(self.queue.shuffled()), Action::Shuffle),
-                (Icon::Prev, 18.0, p().text, Action::Prev),
+                (Icon::Prev, 18.0, skip, Action::Prev),
                 (toggle, 18.0, p().text, Action::Toggle),
-                (Icon::Next, 18.0, p().text, Action::Next),
+                (Icon::Next, 18.0, skip, Action::Next),
                 (repeat, 16.0, on(self.queue.repeat != Repeat::Off), Action::Repeat),
             ];
             for (icon, size, color, action) in buttons {
