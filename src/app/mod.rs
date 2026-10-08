@@ -29,13 +29,11 @@ use crate::settings::Settings;
 use crate::theme;
 use crate::tidal::{self, Item, Lyrics, Quality, Tidal, Track};
 use crate::view::{Sort, View};
-use crate::widgets::art;
 use page::load;
 
 const HISTORY: usize = 30;
 /// How long typing has to pause before searching, in seconds.
 const SEARCH_PAUSE: f64 = 0.25;
-pub const ROOT: &str = "root";
 
 /// What a finished background task does to the app, on the UI thread.
 type Update = Box<dyn FnOnce(&mut App) + Send>;
@@ -146,7 +144,7 @@ pub struct App {
 }
 
 impl App {
-    /// The app in `home` (beside the exe): `data` for small files, `cache` for audio and art.
+    /// The app in `home` (see `main::home`): `data` for small files, `cache` for audio and art.
     pub fn new(cc: &eframe::CreationContext<'_>, home: &Path, settings: Settings) -> Result<Self> {
         let ctx = cc.egui_ctx.clone();
         let data = home.join("data");
@@ -179,7 +177,7 @@ impl App {
                 ctx.request_repaint();
             }
         });
-        player.status.set_volume(settings.volume * settings.volume);
+        player.status.set_volume(settings.volume);
         let controls = np::NowPlaying::start(np::App::new("riptide", "Riptide"), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -228,7 +226,7 @@ impl App {
         };
         // Scrobbles left over from last time, if any.
         if let Some(lastfm) = app.scrobbler() {
-            app.run(async move { lastfm.scrobble(None).await }, None);
+            app.run(async move { lastfm.scrobble(None).await });
         }
         app.scan_themes();
         if app.busy {
@@ -253,10 +251,10 @@ impl App {
     }
 
     /// A background call with no result but, once it's done, an optional note in the top bar.
-    fn run(&self, task: impl Future<Output = Result<()>> + Send + 'static, notice: Option<String>) {
+    fn run(&self, task: impl Future<Output = Result<()>> + Send + 'static) {
         self.spawn(async move {
             task.await?;
-            Ok(then(move |app| app.note(notice)))
+            Ok(then(|_| {}))
         });
     }
 
@@ -337,7 +335,7 @@ impl App {
         // The page showing, opened again, is refreshed in place; results that refine the ones showing
         // replace them, so typing doesn't fill the history.
         let same = self.page.as_ref().is_some_and(|p| p.source == page.source);
-        let refining = [Some(&page.source), self.page.as_ref().map(|p| &p.source)].iter().all(|s| matches!(s, Some(Source::Search(_))));
+        let refining = matches!((&page.source, self.page.as_ref().map(|p| &p.source)), (Source::Search(_), Some(Source::Search(_))));
         if same || refining {
             self.page = Some(page);
         } else if let Some(old) = self.page.replace(page) {
@@ -399,7 +397,7 @@ impl App {
             Action::Play(source) => self.spawn(async move {
                 let page = load(tidal, source).await?;
                 let from = page.origin();
-                let tracks = page.body.into_tracks();
+                let tracks = page.body.tracks().to_vec();
                 Ok(then(move |app| match tracks.is_empty() {
                     true => app.fail("Nothing to play here.".into()),
                     false => app.start(tracks, 0, false, from),
@@ -543,7 +541,7 @@ impl eframe::App for App {
             });
         }
         // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
-        let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| art(t.cover.as_deref(), 640));
+        let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| tidal::image(t.cover.as_deref(), 640));
         let mood = cover.and_then(|url| crate::art::tint(&url));
         // The bar takes the tint too, where its text stays light on it.
         self.player_bar(ui, mood.filter(|_| theme::p().dark), &mut actions);

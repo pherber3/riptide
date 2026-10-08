@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use super::{Action, App, Body, Page, ROOT, Source};
+use super::{Action, App, Body, Page, Source};
 use crate::dialogs::{PlaylistForm, Target};
-use crate::tidal::{Card, Item, Playlist, Tidal, Track};
+use crate::tidal::{Card, Item, Playlist, ROOT, Tidal, Track};
 
 /// The user's collection as the app shows it: what is saved, the sidebar's folders, and the
 /// playlists they made (the ones they can change).
@@ -47,7 +47,7 @@ impl App {
                 let track = matches!(item, Item::Track(_));
                 let task = async move { tidal.set_saved(&item, on).await };
                 // A track's heart changes nothing else; anything else shows in a list or the sidebar.
-                if track { self.run(task, None) } else { self.changed(task, None) }
+                if track { self.run(task) } else { self.changed(task, None) }
             }
             Action::AddToPlaylist(id, track) => {
                 let notice = self.library.playlists.iter().find(|p| p.id == id).map(|p| format!("Added to {}", p.title));
@@ -57,14 +57,14 @@ impl App {
                 if let Some(tracks) = self.open_playlist(&id).filter(|t| index < t.len()) {
                     tracks.remove(index);
                 }
-                self.run(async move { tidal.remove_from_playlist(&id, index).await }, None);
+                self.run(async move { tidal.remove_from_playlist(&id, index).await });
             }
             Action::MoveInPlaylist(id, from, to) => {
                 if let Some(tracks) = self.open_playlist(&id).filter(|t| from.max(to) < t.len()) {
                     let track = tracks.remove(from);
                     tracks.insert(to, track);
                 }
-                self.run(async move { tidal.move_in_playlist(&id, from, to).await }, None);
+                self.run(async move { tidal.move_in_playlist(&id, from, to).await });
             }
             Action::MovePlaylist(id, folder) => self.changed(async move { tidal.arrange("move", &format!("playlist:{id}"), Some(&folder)).await }, None),
             Action::DeletePlaylist(id) => {

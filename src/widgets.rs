@@ -25,11 +25,6 @@ pub fn tier_color(quality: Quality) -> Color32 {
     }
 }
 
-/// A Tidal image id as a URL at one of its sizes.
-pub fn art(id: Option<&str>, size: u32) -> Option<String> {
-    id.map(|id| tidal::image(id, size))
-}
-
 pub fn clock(seconds: f64) -> String {
     let s = seconds as u64;
     match s / 3600 {
@@ -253,10 +248,10 @@ fn card(ui: &mut Ui, card: &Card, actions: &mut Vec<Action>) {
         return;
     }
     let (image, round, title, subtitle) = match card {
-        Card::Album(a) if a.year.is_empty() => (art(a.cover.as_deref(), 320), false, a.title.clone(), a.artist.clone()),
-        Card::Album(a) => (art(a.cover.as_deref(), 320), false, a.title.clone(), format!("{} · {}", a.artist, a.year)),
-        Card::Artist(a) => (art(a.picture.as_deref(), 320), true, a.name.clone(), "Artist".into()),
-        Card::Playlist(p) => (art(p.cover.as_deref(), 320), false, p.title.clone(), format!("{} tracks", p.count)),
+        Card::Album(a) if a.year.is_empty() => (tidal::image(a.cover.as_deref(), 320), false, a.title.clone(), a.artist.clone()),
+        Card::Album(a) => (tidal::image(a.cover.as_deref(), 320), false, a.title.clone(), format!("{} · {}", a.artist, a.year)),
+        Card::Artist(a) => (tidal::image(a.picture.as_deref(), 320), true, a.name.clone(), "Artist".into()),
+        Card::Playlist(p) => (tidal::image(p.cover.as_deref(), 320), false, p.title.clone(), format!("{} tracks", p.count)),
         Card::Mix(m) => (m.image.clone(), false, m.title.clone(), m.subtitle.clone()),
         Card::Folder { name, count, .. } => (None, false, name.clone(), format!("Folder · {count} playlists")),
     };
@@ -399,7 +394,7 @@ pub fn playlist_actions(ui: &mut Ui, id: &str, title: &str, folders: &[Card], ac
             Card::Folder { id, name, .. } => Some((id.as_str(), name.as_str())),
             _ => None,
         });
-        for (folder, name) in std::iter::once((crate::app::ROOT, "Top level")).chain(named) {
+        for (folder, name) in std::iter::once((tidal::ROOT, "Top level")).chain(named) {
             menu_item(ui, actions, name, Action::MovePlaylist(id.into(), folder.into()));
         }
     });
@@ -581,7 +576,7 @@ fn about(ui: &mut Ui, text: &str) {
     }
 }
 
-/// A Tidal web address for something, to share.
+/// A fixed-width cell of a track row, its content centred vertically.
 fn cell(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(vec2(width, height), Layout::left_to_right(Align::Center), |ui| {
         ui.set_width(width);
@@ -661,7 +656,7 @@ impl Rows<'_> {
                         cell(ui, width(share), height, |ui| match sort {
                             Sort::Title => {
                                 if album {
-                                    picture(ui, art(t.cover.as_deref(), 80), THUMB, false);
+                                    picture(ui, tidal::image(t.cover.as_deref(), 80), THUMB, false);
                                     ui.add_space(4.0);
                                 }
                                 let color = if playing { p().accent } else { p().text };
@@ -715,7 +710,7 @@ impl Rows<'_> {
         let t = &tracks[i];
         ui.set_min_width(240.0);
         ui.horizontal(|ui| {
-            picture(ui, art(t.cover.as_deref(), 80), 40.0, false);
+            picture(ui, tidal::image(t.cover.as_deref(), 80), 40.0, false);
             ui.vertical(|ui| {
                 ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(14.0)).color(p().text)).truncate());
                 ui.add(egui::Label::new(RichText::new(&t.artist).size(13.0).color(p().secondary)).truncate());

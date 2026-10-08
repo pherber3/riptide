@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 const V1: &str = "https://api.tidal.com/v1";
 const V2: &str = "https://api.tidal.com/v2";
+/// The id of the top level of the user's playlist folders.
+pub const ROOT: &str = "root";
 const TOKEN: &str = "https://auth.tidal.com/v1/oauth2/token";
 const REDIRECT: &str = "https://tidal.com/android/login/auth";
 const SCOPE: &str = "r_usr+w_usr+w_sub";
@@ -198,9 +200,9 @@ impl Shelf {
     }
 }
 
-/// An image URL from a Tidal image id. Albums come in 80/160/320/640/1280, artists in 160/320/480/750.
-pub fn image(id: &str, size: u32) -> String {
-    format!("https://resources.tidal.com/images/{}/{size}x{size}.jpg", id.replace('-', "/"))
+/// The URL of a Tidal image, if there is one. Albums come in 80/160/320/640/1280, artists in 160/320/480/750.
+pub fn image(id: Option<&str>, size: u32) -> Option<String> {
+    id.map(|id| format!("https://resources.tidal.com/images/{}/{size}x{size}.jpg", id.replace('-', "/")))
 }
 
 /// Where the sign-in is kept, in the app's data directory.
@@ -572,10 +574,10 @@ impl Tidal {
         }
     }
 
-    /// Makes a private playlist at the top level.
+    /// Makes a playlist at the top level.
     pub async fn create_playlist(&self, name: &str, description: &str, public: bool) -> Result<Playlist> {
         let public = public.to_string();
-        let query = [("name", name), ("description", description), ("folderId", "root"), ("isPublic", public.as_str())];
+        let query = [("name", name), ("description", description), ("folderId", ROOT), ("isPublic", public.as_str())];
         let v: Value = self.folders("create-playlist", &query).await?.json().await?;
         playlist(&v["data"]).context("Tidal didn't return the new playlist")
     }
@@ -630,7 +632,7 @@ impl Tidal {
     }
 
     pub async fn create_folder(&self, name: &str) -> Result<()> {
-        self.folders("create-folder", &[("name", name), ("folderId", "root")]).await.map(drop)
+        self.folders("create-folder", &[("name", name), ("folderId", ROOT)]).await.map(drop)
     }
 
     pub async fn rename_folder(&self, id: &str, name: &str) -> Result<()> {
@@ -645,7 +647,7 @@ impl Tidal {
                 Card::Folder { id, .. } => format!("folder:{id}"),
                 _ => continue,
             };
-            self.arrange("move", &item, Some("root")).await?;
+            self.arrange("move", &item, Some(ROOT)).await?;
         }
         self.arrange("remove", &format!("folder:{id}"), None).await
     }

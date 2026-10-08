@@ -61,7 +61,7 @@ impl App {
         {
             self.listening = Some((track.clone(), tidal::now()));
             if let Some(lastfm) = self.scrobbler() {
-                self.run(async move { lastfm.now_playing(&track).await }, None);
+                self.run(async move { lastfm.now_playing(&track).await });
             }
         }
     }
@@ -98,7 +98,7 @@ impl App {
 
     fn scrobble(&mut self) {
         if let Some(scrobble) = self.finish_listening() {
-            self.run(scrobble, None);
+            self.run(scrobble);
         }
     }
 
@@ -167,7 +167,7 @@ impl App {
                 artists: vec![t.artist.clone()],
                 album: t.album.clone(),
                 duration: Some(Duration::from_secs(t.duration.into())),
-                art_url: t.cover.as_deref().map(|c| tidal::image(c, 640)),
+                art_url: tidal::image(t.cover.as_deref(), 640),
                 ..Default::default()
             });
             let position = Duration::from_secs_f64(self.player.status.position());

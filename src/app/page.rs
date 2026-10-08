@@ -1,10 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::ROOT;
-use crate::tidal::{Card, Item, Mix, Shelf, Tidal, Track};
+use crate::tidal::{self, Card, Item, Mix, ROOT, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
-use crate::widgets::art;
 
 const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
 const NAME_SORTS: &[Sort] = &[Sort::Added, Sort::Title];
@@ -104,14 +102,6 @@ impl Body {
             Self::Grid { .. } | Self::Settings => &[],
         }
     }
-
-    pub fn into_tracks(self) -> Vec<Track> {
-        match self {
-            Self::Tracks { tracks, .. } => tracks,
-            Self::Shelves(shelves) => shelves.into_iter().map(|s| s.tracks).find(|t| !t.is_empty()).unwrap_or_default(),
-            Self::Grid { .. } | Self::Settings => Vec::new(),
-        }
-    }
 }
 
 pub struct Page {
@@ -142,18 +132,18 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         Source::Album(id) => {
             let (album, list) = tidal.album(*id).await?;
             let subtitle = [album.artist.as_str(), &album.year].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
-            let art = Some((art(album.cover.as_deref(), 640), false));
+            let art = Some((tidal::image(album.cover.as_deref(), 640), false));
             (Some(Head { item: Some(Item::Album(*id)), title: album.title, subtitle, art, radio: None }), tracks(list, false))
         }
         Source::Artist(id) => {
             let (artist, shelves) = tidal.artist(*id).await?;
-            let art = Some((art(artist.picture.as_deref(), 480), true));
+            let art = Some((tidal::image(artist.picture.as_deref(), 480), true));
             let head = Head { item: Some(Item::Artist(*id)), title: artist.name, subtitle: String::new(), art, radio: Some(Source::ArtistRadio(*id)) };
             (Some(head), Body::Shelves(shelves))
         }
         Source::Playlist(id) => {
             let (playlist, list) = tidal.playlist(id).await?;
-            let art = Some((art(playlist.cover.as_deref(), 640), false));
+            let art = Some((tidal::image(playlist.cover.as_deref(), 640), false));
             (Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, subtitle: String::new(), art, radio: None }), tracks(list, true))
         }
         Source::Mix(mix) => {

@@ -53,8 +53,9 @@ impl Status {
         self.played.load(Relaxed) as f64 / self.samples_per_second.load(Relaxed).max(1) as f64
     }
 
-    pub fn set_volume(&self, volume: f32) {
-        self.volume.store(volume.to_bits(), Relaxed);
+    /// Sets the volume from the slider's position, on a curve that sounds even across its range.
+    pub fn set_volume(&self, slider: f32) {
+        self.volume.store((slider * slider).to_bits(), Relaxed);
     }
 
     pub fn level(&self) -> f32 {

@@ -7,7 +7,7 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
 use crate::tidal::{self, Card, Item, Quality};
-use crate::widgets::{Rows, art, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
+use crate::widgets::{Rows, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -162,7 +162,7 @@ impl App {
                 let track = self.queue.current();
                 cols[0].horizontal_centered(|ui| {
                     let Some(t) = track else { return };
-                    let cover = picture(ui, art(t.cover.as_deref(), 160), 56.0, false);
+                    let cover = picture(ui, tidal::image(t.cover.as_deref(), 160), 56.0, false);
                     if cover.hovered() {
                         ui.painter().rect_filled(cover.rect, 6.0, Color32::from_black_alpha(90));
                     }
@@ -244,13 +244,13 @@ impl App {
                     let slider = bar(ui, &mut volume, 1.0, 96.0, true);
                     if slider.changed() {
                         self.settings.volume = volume as f32;
-                        status.set_volume(self.settings.volume * self.settings.volume);
+                        status.set_volume(self.settings.volume);
                     }
                     save = slider.drag_stopped() || slider.clicked();
                     let muted = self.settings.volume == 0.0;
                     if icon_button(ui, if muted { Icon::Muted } else { Icon::Volume }, 18.0, p().secondary).on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
                         self.settings.volume = if muted { self.unmuted.take().unwrap_or(0.5) } else { self.unmuted = Some(self.settings.volume); 0.0 };
-                        status.set_volume(self.settings.volume * self.settings.volume);
+                        status.set_volume(self.settings.volume);
                         save = true;
                     }
                     ui.add_space(6.0);
@@ -333,7 +333,7 @@ impl App {
                 ui.vertical(|ui| {
                     ui.set_width(side);
                     ui.add_space(top);
-                    picture(ui, art(t.cover.as_deref(), 640), side, false);
+                    picture(ui, tidal::image(t.cover.as_deref(), 640), side, false);
                     ui.add_space(16.0);
                     ui.add(egui::Label::new(RichText::new(&t.title).font(semibold(20.0)).color(Color32::WHITE)).truncate());
                     ui.add(egui::Label::new(RichText::new(&t.artist).size(15.0).color(soft)).truncate());

@@ -44,8 +44,8 @@ impl Discord {
                 "timestamps": { "start": started * 1000, "end": (started + i64::from(t.duration)) * 1000 },
                 "buttons": [{ "label": "Open in Tidal", "url": Item::Track(t.id).link() }],
             });
-            if let Some(cover) = &t.cover {
-                activity["assets"] = json!({ "large_image": tidal::image(cover, 640), "large_text": t.album });
+            if let Some(cover) = tidal::image(t.cover.as_deref(), 640) {
+                activity["assets"] = json!({ "large_image": cover, "large_text": t.album });
             }
             activity
         });
