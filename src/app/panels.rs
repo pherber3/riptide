@@ -412,14 +412,20 @@ impl App {
             if self.settings_open {
                 let lastfm_user = self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.as_str());
                 egui::ScrollArea::vertical()
+                    .id_salt("settings")
                     .auto_shrink(false)
                     .show(ui, |ui| crate::settings::page(ui, &mut self.settings, &self.themes, lastfm_user, &self.data, actions));
                 return;
             }
+            let mut area = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
+            if let Some(y) = self.scroll_to.take() {
+                area = area.vertical_scroll_offset(y);
+            }
             let Some(page) = &mut self.page else { return };
             let list = editing.as_deref().map_or(List::Tracks, List::Playlist);
             let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list };
-            let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| super::views::page(ui, page, &rows, actions));
+            let scrolled = area.show(ui, |ui| super::views::page(ui, page, &rows, actions));
+            page.scroll = scrolled.state.offset.y;
             if let Some(color) = tint {
                 let rect = egui::Rect::from_min_size(full.min - vec2(0.0, scrolled.state.offset.y), vec2(full.width(), 460.0));
                 ui.painter().set(glow, egui::Shape::gradient_rect(rect, egui::Direction::TopDown, [color.gamma_multiply(0.6), Color32::TRANSPARENT]));

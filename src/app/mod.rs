@@ -114,6 +114,9 @@ pub struct App {
     shown: (Option<u64>, np::Playback),
     page: Option<Page>,
     history: History,
+    /// Where the page scrolls to on its next frame: the top of a page just opened, or where a page
+    /// from history was left.
+    scroll_to: Option<f32>,
     kept: Kept,
     loading: bool,
     query: String,
@@ -211,6 +214,7 @@ impl App {
             shown: (None, np::Playback::Stopped),
             page: None,
             history: History::default(),
+            scroll_to: None,
             kept: Kept::default(),
             loading: true,
             query: String::new(),
@@ -354,6 +358,9 @@ impl App {
     fn show(&mut self, mut page: Page, replace: bool) {
         page.view = page.source.sort_key().map(|key| View::new(key, self.settings.sorts.get(key).copied().unwrap_or_default()));
         let same = self.page.as_ref().is_some_and(|p| p.source == page.source);
+        if !(same || replace) {
+            self.scroll_to = Some(0.0);
+        }
         self.history.open(&mut self.page, page, same || replace);
         // A page opened from the settings takes their place.
         (self.loading, self.settings_open) = (false, false);
@@ -362,6 +369,7 @@ impl App {
     /// Steps through history like a browser.
     fn step(&mut self, back: bool) {
         self.history.step(&mut self.page, back);
+        self.scroll_to = self.page.as_ref().map(|p| p.scroll);
     }
 
     /// What reopening restores: settings, window, queue and position.

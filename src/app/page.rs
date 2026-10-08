@@ -134,6 +134,8 @@ pub struct Page {
     pub body: Body,
     /// Filter and sort, on pages that have them.
     pub view: Option<View>,
+    /// How far down it is scrolled, so going back to it returns there.
+    pub scroll: f32,
 }
 
 impl Page {
@@ -292,5 +294,5 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
         Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.track_radio(*id).await?, true)),
         Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.artist_radio(*id).await?, true)),
     };
-    Ok(Page { source, head, body, view: None })
+    Ok(Page { source, head, body, view: None, scroll: 0.0 })
 }
