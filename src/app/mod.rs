@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use egui::{Key, Ui};
@@ -32,6 +32,8 @@ use crate::tidal::{self, Item, Lyrics, Quality, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 use page::{History, load};
 
+/// How long a loaded Home is shown again as it is, without asking Tidal for a new one.
+const HOME_FRESH: Duration = Duration::from_secs(10 * 60);
 /// How long typing has to pause before searching, in seconds.
 const SEARCH_PAUSE: f64 = 0.25;
 
@@ -112,7 +114,7 @@ pub struct App {
     page: Option<Page>,
     history: History,
     /// Home as it was last loaded, to show at once when it is opened again.
-    home: Option<Vec<Shelf>>,
+    home: Option<(Vec<Shelf>, Instant)>,
     loading: bool,
     query: String,
     /// When to search for what's being typed (egui time), once typing pauses.
@@ -348,9 +350,6 @@ impl App {
 
     /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
     fn show(&mut self, mut page: Page) {
-        if let (Source::Home, Body::Shelves(shelves)) = (&page.source, &page.body) {
-            self.home = Some(shelves.clone());
-        }
         page.view = page.source.sort_key().map(|key| View::new(key, self.settings.sorts.get(key).copied().unwrap_or_default()));
         // The page showing, opened again, is refreshed in place; results that refine the ones showing
         // replace them, so typing doesn't fill the history.
@@ -391,11 +390,16 @@ impl App {
         match action {
             Action::Open(source) => {
                 (self.loading, self.message, self.lyrics_open) = (true, None, false);
-                // Home shows at once as it was last time, then the fresh one replaces it, if it is
-                // still showing by then.
-                let refresh = source == Source::Home && self.home.is_some();
-                if let Some(shelves) = self.home.clone().filter(|_| refresh) {
+                // Home shows at once as it was last loaded. Only once that is a while ago is it
+                // fetched again, replacing it in place if it's still showing by then; opening it
+                // while it shows always does.
+                let on_home = self.page.as_ref().is_some_and(|p| p.source == Source::Home);
+                let refresh = source == Source::Home && (on_home || self.home.is_some());
+                if let Some((shelves, loaded)) = self.home.clone().filter(|_| source == Source::Home && !on_home) {
                     self.show(Page { source: Source::Home, head: None, body: Body::Shelves(shelves), view: None });
+                    if loaded.elapsed() < HOME_FRESH {
+                        return;
+                    }
                     self.loading = true;
                 }
                 self.spawn(async move {
@@ -403,6 +407,9 @@ impl App {
                     Ok(then(move |app| {
                         // Results for an older query than the one typed now are dropped.
                         let stale_search = matches!(&page.source, Source::Search(q) if *q != app.query.trim());
+                        if let (Source::Home, Body::Shelves(shelves)) = (&page.source, &page.body) {
+                            app.home = Some((shelves.clone(), Instant::now()));
+                        }
                         let left_home = refresh && app.page.as_ref().is_none_or(|p| p.source != Source::Home);
                         if left_home {
                             app.loading = false;
