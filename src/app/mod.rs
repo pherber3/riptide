@@ -521,33 +521,8 @@ impl eframe::App for App {
         }
         let mut actions = Vec::new();
         self.window(&ctx, &mut actions);
-        let typing = ctx.memory(|m| m.focused().is_some());
-        ui.input(|i| {
-            if i.key_pressed(Key::Space) && !typing {
-                actions.push(Action::Toggle);
-            }
-            if i.key_pressed(Key::Escape) && self.lyrics_open {
-                actions.push(Action::Lyrics);
-            }
-            // The mouse's side buttons, Alt+arrows and the keyboard's Back key, as in a web browser.
-            let alt = |key| i.modifiers.alt && i.key_pressed(key);
-            if i.pointer.button_pressed(egui::PointerButton::Extra1) || alt(Key::ArrowLeft) || i.key_pressed(Key::BrowserBack) {
-                actions.push(Action::Step(true));
-            }
-            if i.pointer.button_pressed(egui::PointerButton::Extra2) || alt(Key::ArrowRight) {
-                actions.push(Action::Step(false));
-            }
-        });
-        if self.lyrics_open
-            && let (Some(id), Some(tidal)) = (self.queue.current().map(|t| t.id), self.tidal.clone())
-            && self.lyrics.as_ref().is_none_or(|(loaded, _)| *loaded != id)
-        {
-            self.lyrics = Some((id, None));
-            self.spawn(async move {
-                let lyrics = tidal.lyrics(id).await?;
-                Ok(then(move |app| (app.lyrics, app.lyric_line) = (Some((id, Some(lyrics))), None)))
-            });
-        }
+        self.keys(ui, &mut actions);
+        self.fetch_lyrics();
         // While the lyrics are open the window takes on the artwork's colour, as in Tidal.
         let cover = self.queue.current().filter(|_| self.lyrics_open).and_then(|t| tidal::image(t.cover.as_deref(), 640));
         let mood = cover.and_then(|url| crate::art::tint(&url));
@@ -558,16 +533,10 @@ impl eframe::App for App {
         } else {
             self.sidebar(ui, &mut actions);
             self.queue_panel(ui, &mut actions);
-            // What the settings page changes takes effect, and is kept.
             let before = self.settings_open.then(|| self.settings.clone());
             self.content(ui, &mut actions);
             if let Some(before) = before.filter(|before| *before != self.settings) {
-                if before.device != self.settings.device {
-                    self.player.send(Cmd::Device(self.settings.device.clone()));
-                }
-                self.apply_theme();
-                self.apply_gain();
-                self.settings.save(&self.data);
+                self.settings_changed(&before);
             }
         }
         self.drag_label(&ctx);
@@ -583,13 +552,64 @@ impl eframe::App for App {
         for action in actions {
             self.apply(action);
         }
-        // The clock moves once a second; open lyrics also wake for their next line. Nothing to
-        // redraw while the window can't be seen.
+        self.wake_while_playing();
+    }
+}
+
+impl App {
+    /// Space plays and pauses, Escape closes the lyrics; the mouse's side buttons, Alt+arrows and
+    /// the keyboard's Back key step through history, as in a web browser.
+    fn keys(&self, ui: &Ui, actions: &mut Vec<Action>) {
+        let typing = ui.ctx().memory(|m| m.focused().is_some());
+        ui.input(|i| {
+            if i.key_pressed(Key::Space) && !typing {
+                actions.push(Action::Toggle);
+            }
+            if i.key_pressed(Key::Escape) && self.lyrics_open {
+                actions.push(Action::Lyrics);
+            }
+            let alt = |key| i.modifiers.alt && i.key_pressed(key);
+            if i.pointer.button_pressed(egui::PointerButton::Extra1) || alt(Key::ArrowLeft) || i.key_pressed(Key::BrowserBack) {
+                actions.push(Action::Step(true));
+            }
+            if i.pointer.button_pressed(egui::PointerButton::Extra2) || alt(Key::ArrowRight) {
+                actions.push(Action::Step(false));
+            }
+        });
+    }
+
+    /// The playing track's lyrics, fetched once the lyrics view is open.
+    fn fetch_lyrics(&mut self) {
+        if self.lyrics_open
+            && let (Some(id), Some(tidal)) = (self.queue.current().map(|t| t.id), self.tidal.clone())
+            && self.lyrics.as_ref().is_none_or(|(loaded, _)| *loaded != id)
+        {
+            self.lyrics = Some((id, None));
+            self.spawn(async move {
+                let lyrics = tidal.lyrics(id).await?;
+                Ok(then(move |app| (app.lyrics, app.lyric_line) = (Some((id, Some(lyrics))), None)))
+            });
+        }
+    }
+
+    /// What the settings page changed takes effect, and is kept.
+    fn settings_changed(&mut self, before: &Settings) {
+        if before.device != self.settings.device {
+            self.player.send(Cmd::Device(self.settings.device.clone()));
+        }
+        self.apply_theme();
+        self.apply_gain();
+        self.settings.save(&self.data);
+    }
+
+    /// The clock moves once a second; open lyrics also wake for their next line. Nothing to redraw
+    /// while the window can't be seen.
+    fn wake_while_playing(&self) {
         if self.player.status.playing.load(Relaxed) && !self.out_of_sight() {
             let position = self.player.status.position();
             let lyrics = self.lyrics.as_ref().and_then(|(_, l)| l.as_ref()).filter(|_| self.lyrics_open);
             let next_line = lyrics.and_then(|l| l.synced.iter().find(|(at, _)| *at > position)).map(|(at, _)| at - position);
-            ctx.request_repaint_after(Duration::from_secs_f64(next_line.unwrap_or(1.0).clamp(0.02, 1.0)));
+            self.ctx.request_repaint_after(Duration::from_secs_f64(next_line.unwrap_or(1.0).clamp(0.02, 1.0)));
         }
     }
 }
