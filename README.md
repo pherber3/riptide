@@ -1,6 +1,7 @@
 # Riptide
 
-A small, fast desktop player for TIDAL, written in Rust.
+A small, fast desktop client for TIDAL on Windows, macOS and Linux, written in Rust. Hi-res
+lossless playback, synced lyrics, your whole library, Last.fm scrobbling and Discord status.
 
 ![Riptide's home page](assets/screenshot.webp)
 
@@ -8,6 +9,8 @@ TIDAL's own desktop app is a web app in a window: several processes and around h
 memory to play music. Riptide is one native program. On the same Windows PC, playing the same
 playlist, it used about 250 MB in one process against TIDAL's 520 MB across eight, sits at 0% CPU
 when idle, and spends under 1% of one core decoding 24-bit/192 kHz FLAC.
+
+On Linux, where TIDAL has no desktop app at all, it's a native one.
 
 Riptide is unofficial and not affiliated with TIDAL. You need a paid TIDAL subscription.
 
