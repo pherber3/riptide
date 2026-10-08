@@ -129,4 +129,9 @@ It is built with [egui](https://github.com/emilk/egui) and the
 [Spotifast](https://github.com/crmne/spotifast), which showed how small a desktop music player can
 be. Icons are from [Lucide](https://lucide.dev).
 
+I did this for myself but figured others might be able to use it too. I just wanted a super lightweight
+client that doesn't have uploading tabs pushed, take seconds to respond, or have audio fail to play every so often.
+This means it is intentionally a stripped down version of the client: no video support, no ATMOS support (since it's
+impossible to add *legally*), no uploads, etc. Let me know if anything is missing that would be nice to add.
+
 MIT License.
