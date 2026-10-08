@@ -128,7 +128,8 @@ impl Album {
 pub struct Edition {
     /// The best tier it streams in.
     pub quality: Quality,
-    /// A Dolby Atmos mix, which Tidal streams to desktop apps in stereo.
+    /// A Dolby Atmos edition. Tidal streams it to desktop apps as the album's stereo master, so it
+    /// plays like a Max edition, but a stereo edition is the one to show when there is one.
     pub atmos: bool,
     pub explicit: bool,
 }
@@ -136,12 +137,12 @@ pub struct Edition {
 impl Edition {
     fn of(v: &Value) -> Self {
         let tags: Vec<_> = each(&v["mediaMetadata"]["tags"]).filter_map(Value::as_str).collect();
+        let atmos = !tags.contains(&"LOSSLESS") && tags.contains(&"DOLBY_ATMOS");
         let quality = match () {
-            _ if tags.contains(&"HIRES_LOSSLESS") => Quality::Max,
+            _ if atmos || tags.contains(&"HIRES_LOSSLESS") => Quality::Max,
             _ if tags.contains(&"LOSSLESS") => Quality::High,
             _ => Quality::Low,
         };
-        let atmos = quality == Quality::Low && tags.contains(&"DOLBY_ATMOS");
         Self { quality, atmos, explicit: v["explicit"].as_bool().unwrap_or(false) }
     }
 
@@ -154,7 +155,7 @@ impl Edition {
     /// Its name, in the tiers the player shows: "Max · Explicit", saying explicit or clean only
     /// when that tells the editions apart.
     pub fn name(self, explicit_varies: bool) -> String {
-        let tier = if self.atmos { "Dolby Atmos" } else { self.quality.name() };
+        let tier = self.quality.name();
         match (explicit_varies, self.explicit) {
             (false, _) => tier.into(),
             (true, true) => format!("{tier} · Explicit"),
