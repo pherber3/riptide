@@ -1,13 +1,17 @@
 use egui::{Color32, Context, RichText, Ui, vec2};
 
 use crate::app::Action;
-use crate::theme::{p, Icon, bold, medium, semibold};
+use crate::theme::{Icon, bold, medium, p, semibold};
 use crate::widgets::{icon_button, setting, switch};
 
 /// The one dialog that can be open at a time.
 pub enum Dialog {
     /// "Are you sure?" before something that can't be undone, then the action.
-    Confirm { title: String, text: &'static str, then: Action },
+    Confirm {
+        title: String,
+        text: &'static str,
+        then: Action,
+    },
     /// A track's credits: its title, then each role and its names.
     Credits(String, Vec<(String, String)>),
     Form(PlaylistForm),

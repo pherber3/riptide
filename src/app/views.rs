@@ -7,7 +7,7 @@ use crate::dialogs::{self, Target};
 use crate::theme::{Icon, bold, medium, p, semibold};
 use crate::tidal::{self, Card, Item, Track};
 use crate::view::{Sort, View, in_order, ordered};
-use crate::widgets::{arrow, chip, clickable, clock, fitted, icon_button, link_text, paint_picture, picture, pill, play_disc, section, search_field};
+use crate::widgets::{arrow, chip, clickable, clock, fitted, icon_button, link_text, paint_picture, picture, pill, play_disc, search_field, section};
 
 const CARD: f32 = 168.0;
 
@@ -40,7 +40,8 @@ pub fn heart(ui: &mut Ui, id: u64, library: &Library, visible: bool, actions: &m
         ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
         return;
     }
-    let (icon, color, hint) = if on { (Icon::HeartFilled, p().accent, "Remove from your collection") } else { (Icon::Heart, p().secondary, "Add to your collection") };
+    let (icon, color, hint) =
+        if on { (Icon::HeartFilled, p().accent, "Remove from your collection") } else { (Icon::Heart, p().secondary, "Add to your collection") };
     if icon_button(ui, icon, 16.0, color).on_hover_text(hint).clicked() {
         actions.push(Action::Save(item, !on));
     }
@@ -375,7 +376,12 @@ impl Rows<'_> {
                 _ => None,
             };
             let added = tracks.first().is_some_and(|t| t.added.is_some());
-            let columns = [(Sort::Title, "TITLE", 0.4, true), (Sort::Artist, "ARTIST", 0.25, true), (Sort::Album, "ALBUM", 0.22, album), (Sort::Added, "DATE ADDED", 0.13, added)];
+            let columns = [
+                (Sort::Title, "TITLE", 0.4, true),
+                (Sort::Artist, "ARTIST", 0.25, true),
+                (Sort::Album, "ALBUM", 0.22, album),
+                (Sort::Added, "DATE ADDED", 0.13, added),
+            ];
             let columns: Vec<_> = columns.into_iter().filter(|c| c.3).collect();
             let free = ui.available_width() - NUMBER - TIME - HEART - ui.spacing().item_spacing.x * 6.0;
             let total: f32 = columns.iter().map(|c| c.2).sum();
@@ -436,7 +442,12 @@ impl Rows<'_> {
                                     ui.add_space(4.0);
                                 }
                                 let color = if playing { p().accent } else { p().text };
-                                let title = ui.add(egui::Label::new(RichText::new(&t.title).font(medium(14.0)).color(color)).truncate().selectable(false).sense(Sense::click()));
+                                let title = ui.add(
+                                    egui::Label::new(RichText::new(&t.title).font(medium(14.0)).color(color))
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                );
                                 if title.clicked() {
                                     actions.push(play());
                                 }

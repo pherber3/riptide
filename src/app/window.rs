@@ -75,7 +75,8 @@ impl App {
         ctx.input(|i| {
             let v = i.viewport();
             self.settings.maximized = v.maximized.unwrap_or(false);
-            if !self.settings.maximized && v.minimized != Some(true)
+            if !self.settings.maximized
+                && v.minimized != Some(true)
                 && let (Some(outer), Some(inner)) = (v.outer_rect, v.inner_rect)
             {
                 self.settings.window = Some([outer.min.x, outer.min.y, inner.width(), inner.height()]);

@@ -215,7 +215,13 @@ pub fn apply(ctx: &egui::Context, c: Palette) {
         v.popup_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: c.shadow };
         v.striped = false;
         let w = &mut v.widgets;
-        for (state, fill, text) in [(&mut w.noninteractive, c.window, c.text), (&mut w.inactive, c.surface, c.secondary), (&mut w.hovered, c.surface_hover, c.text), (&mut w.active, c.surface_active, c.text), (&mut w.open, c.surface_hover, c.text)] {
+        for (state, fill, text) in [
+            (&mut w.noninteractive, c.window, c.text),
+            (&mut w.inactive, c.surface, c.secondary),
+            (&mut w.hovered, c.surface_hover, c.text),
+            (&mut w.active, c.surface_active, c.text),
+            (&mut w.open, c.surface_hover, c.text),
+        ] {
             state.corner_radius = CornerRadius::same(6);
             state.bg_fill = fill;
             state.weak_bg_fill = fill;

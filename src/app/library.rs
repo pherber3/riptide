@@ -48,7 +48,11 @@ impl App {
     pub(super) fn edit(&mut self, tidal: Tidal, action: Action) {
         match action {
             Action::Save(item, on) => {
-                if on { self.library.saved.insert(item.clone()) } else { self.library.saved.remove(&item) };
+                if on {
+                    self.library.saved.insert(item.clone())
+                } else {
+                    self.library.saved.remove(&item)
+                };
                 // A track's heart changes nothing else; anything else shows in its list or the sidebar.
                 let list = match item {
                     Item::Track(_) => None,

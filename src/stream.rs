@@ -59,9 +59,7 @@ async fn fetch(parts: &Parts, w: &mut Writer) -> Result<()> {
             }
             // A few segments in flight at once, written in order.
             anyhow::ensure!(*count > 0, "the stream manifest lists no segments");
-            let mut segments = stream::iter(*start..start + count)
-                .map(|n| tidal::fetch(template.replace("$Number$", &n.to_string())))
-                .buffered(PARALLEL);
+            let mut segments = stream::iter(*start..start + count).map(|n| tidal::fetch(template.replace("$Number$", &n.to_string()))).buffered(PARALLEL);
             while let Some(segment) = segments.next().await {
                 let segment = segment?;
                 if dfla.is_none() {

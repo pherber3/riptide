@@ -39,7 +39,19 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { quality: Quality::Max, volume: 1.0, normalize: false, close_to_tray: false, device: None, theme: None, tide: true, discord: false, window: None, maximized: false, sorts: HashMap::new() }
+        Self {
+            quality: Quality::Max,
+            volume: 1.0,
+            normalize: false,
+            close_to_tray: false,
+            device: None,
+            theme: None,
+            tide: true,
+            discord: false,
+            window: None,
+            maximized: false,
+            sorts: HashMap::new(),
+        }
     }
 }
 
@@ -148,4 +160,3 @@ fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
         add(ui);
     });
 }
-

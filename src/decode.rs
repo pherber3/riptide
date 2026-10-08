@@ -34,9 +34,7 @@ impl Decoder {
     pub fn open(reader: Reader) -> Result<Self> {
         let download = reader.download();
         let mss = MediaSourceStream::new(Box::new(reader), Default::default());
-        let format = symphonia::default::get_probe()
-            .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())?
-            .format;
+        let format = symphonia::default::get_probe().format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())?.format;
         let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).context("no audio track")?;
         let p = &track.codec_params;
         let info = Info {

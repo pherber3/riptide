@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use egui::{Color32, ColorImage};
 use egui::load::{ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint};
+use egui::{Color32, ColorImage};
 
 enum Entry {
     Pending,

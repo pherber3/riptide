@@ -197,7 +197,9 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             // A page of one list ("View all") shows as a grid or a track list under that list's name.
             let title = if title.is_empty() { shelves.first().map(|s| s.title.clone()).unwrap_or_default() } else { title };
             let body = match shelves.as_mut_slice() {
-                [only] if only.tracks.is_empty() && only.links.is_empty() && !only.cards.is_empty() => Body::Grid { cards: std::mem::take(&mut only.cards), sorts: &[] },
+                [only] if only.tracks.is_empty() && only.links.is_empty() && !only.cards.is_empty() => {
+                    Body::Grid { cards: std::mem::take(&mut only.cards), sorts: &[] }
+                }
                 [only] if only.cards.is_empty() && only.links.is_empty() && !only.tracks.is_empty() => tracks(std::mem::take(&mut only.tracks), true),
                 _ => Body::Shelves(shelves),
             };

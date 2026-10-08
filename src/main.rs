@@ -68,12 +68,8 @@ fn main() -> Result<()> {
             if let Some([x, y, width, height]) = settings.window {
                 viewport = viewport.with_position([x, y]).with_inner_size([width, height]);
             }
-            let options = eframe::NativeOptions {
-                viewport,
-                ..Default::default()
-            };
-            eframe::run_native("riptide", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir, settings)?))))
-                .map_err(|e| anyhow!("{e}"))?;
+            let options = eframe::NativeOptions { viewport, ..Default::default() };
+            eframe::run_native("riptide", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, &dir, settings)?)))).map_err(|e| anyhow!("{e}"))?;
         }
         ["play", id, rest @ ..] => {
             let quality = match rest.first() {

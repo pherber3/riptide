@@ -220,16 +220,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
                 *status.format.lock().unwrap() = (tier, label);
                 let resampler = Resampler::new(i.sample_rate, format.0, format.1)?;
                 let empty = Vec::new;
-                track = Some(Track {
-                    decoder,
-                    resampler,
-                    tx: ring(0.0, format),
-                    mapped: empty(),
-                    ready: empty(),
-                    sent: 0,
-                    ended: false,
-                    pending_seek: None,
-                });
+                track = Some(Track { decoder, resampler, tx: ring(0.0, format), mapped: empty(), ready: empty(), sent: 0, ended: false, pending_seek: None });
                 status.set_pending_seek(None);
                 set_playing(&status, &mut output, play);
             }

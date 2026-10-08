@@ -574,11 +574,9 @@ impl Tidal {
     pub async fn folder(&self, id: &str) -> Result<Vec<Card>> {
         let query = [("folderId", id), ("includeOnly", ""), ("order", "DATE"), ("orderDirection", "DESC")];
         let entry = |item: &Value| match item["itemType"].as_str()? {
-            "FOLDER" => Some(Card::Folder {
-                id: text(&item["data"]["id"]),
-                name: text(&item["name"]),
-                count: item["data"]["totalNumberOfItems"].as_u64().unwrap_or(0),
-            }),
+            "FOLDER" => {
+                Some(Card::Folder { id: text(&item["data"]["id"]), name: text(&item["name"]), count: item["data"]["totalNumberOfItems"].as_u64().unwrap_or(0) })
+            }
             "PLAYLIST" => playlist(&item["data"]).map(Card::Playlist),
             _ => None,
         };
