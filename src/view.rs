@@ -33,6 +33,7 @@ impl Sort {
 }
 
 /// A list page's filter and sort, and the row order they give. `key` names the remembered sort.
+#[derive(Clone)]
 pub struct View {
     pub key: &'static str,
     pub filter: String,

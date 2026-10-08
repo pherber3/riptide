@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -66,9 +68,19 @@ impl Source {
     pub fn explore() -> Self {
         Self::Page("pages/explore".into())
     }
+
+    /// How long a page of this kind can be shown again as it was, without asking Tidal: only
+    /// recommendations and editorial pages, which change slowly. Anything else is always fetched.
+    pub fn keeps(&self) -> Option<Duration> {
+        match self {
+            Self::Home | Self::Page(_) => Some(Duration::from_secs(10 * 60)),
+            _ => None,
+        }
+    }
 }
 
 /// A page's title, artwork (with whether it is round) and radio.
+#[derive(Clone)]
 pub struct Head {
     /// What the header's save button saves, or for the user's own playlist, what its menu changes.
     pub item: Option<Item>,
@@ -86,6 +98,7 @@ impl Head {
     }
 }
 
+#[derive(Clone)]
 pub enum Body {
     Tracks { tracks: Vec<Track>, album_column: bool },
     Grid { cards: Vec<Card>, sorts: &'static [Sort] },
@@ -103,6 +116,7 @@ impl Body {
     }
 }
 
+#[derive(Clone)]
 pub struct Page {
     pub source: Source,
     pub head: Option<Head>,
@@ -151,6 +165,27 @@ impl History {
 
     pub fn can_step(&self, back: bool) -> bool {
         !if back { &self.back } else { &self.forward }.is_empty()
+    }
+}
+
+/// Slow-changing pages as they were last loaded, to show at once when opened again (see
+/// `Source::keeps`).
+#[derive(Default)]
+pub struct Kept(Vec<(Page, Instant)>);
+
+impl Kept {
+    /// Keeps a freshly loaded page if its kind keeps, dropping any that have gone stale.
+    pub fn keep(&mut self, page: &Page) {
+        self.0.retain(|(kept, at)| kept.source != page.source && kept.source.keeps().is_some_and(|keep| at.elapsed() < keep));
+        if page.source.keeps().is_some() {
+            self.0.push((page.clone(), Instant::now()));
+        }
+    }
+
+    /// The kept copy of a page, and whether it is still fresh enough to show without fetching.
+    pub fn get(&self, source: &Source) -> Option<(Page, bool)> {
+        let (page, at) = self.0.iter().find(|(kept, _)| kept.source == *source)?;
+        Some((page.clone(), source.keeps().is_some_and(|keep| at.elapsed() < keep)))
     }
 }
 

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use egui::{Key, Ui};
@@ -28,12 +28,10 @@ use crate::player::{Cmd, Player};
 use crate::queue::Queue;
 use crate::settings::Settings;
 use crate::theme;
-use crate::tidal::{self, Item, Lyrics, Quality, Shelf, Tidal, Track};
+use crate::tidal::{self, Item, Lyrics, Quality, Tidal, Track};
 use crate::view::{Sort, View};
-use page::{History, load};
+use page::{History, Kept, load};
 
-/// How long a loaded Home is shown again as it is, without asking Tidal for a new one.
-const HOME_FRESH: Duration = Duration::from_secs(10 * 60);
 /// How long typing has to pause before searching, in seconds.
 const SEARCH_PAUSE: f64 = 0.25;
 
@@ -113,8 +111,7 @@ pub struct App {
     shown: (Option<u64>, np::Playback),
     page: Option<Page>,
     history: History,
-    /// Home as it was last loaded, to show at once when it is opened again.
-    home: Option<(Vec<Shelf>, Instant)>,
+    kept: Kept,
     loading: bool,
     query: String,
     /// When to search for what's being typed (egui time), once typing pauses.
@@ -211,7 +208,7 @@ impl App {
             shown: (None, np::Playback::Stopped),
             page: None,
             history: History::default(),
-            home: None,
+            kept: Kept::default(),
             loading: true,
             query: String::new(),
             search_due: None,
@@ -390,14 +387,15 @@ impl App {
         match action {
             Action::Open(source) => {
                 (self.loading, self.message, self.lyrics_open) = (true, None, false);
-                // Home shows at once as it was last loaded. Only once that is a while ago is it
-                // fetched again, replacing it in place if it's still showing by then; opening it
-                // while it shows always does.
-                let on_home = self.page.as_ref().is_some_and(|p| p.source == Source::Home);
-                let refresh = source == Source::Home && (on_home || self.home.is_some());
-                if let Some((shelves, loaded)) = self.home.clone().filter(|_| source == Source::Home && !on_home) {
-                    self.show(Page { source: Source::Home, head: None, body: Body::Shelves(shelves), view: None });
-                    if loaded.elapsed() < HOME_FRESH {
+                // A page kept from last time shows at once, and is only fetched again once it's
+                // stale. Opening the page showing fetches it again. Either way the new copy replaces
+                // the one showing, if that is still the page showing when it arrives.
+                let showing = self.page.as_ref().is_some_and(|p| p.source == source);
+                let kept = if showing { None } else { self.kept.get(&source) };
+                let in_place = showing || kept.is_some();
+                if let Some((page, fresh)) = kept {
+                    self.show(page);
+                    if fresh {
                         return;
                     }
                     self.loading = true;
@@ -407,11 +405,9 @@ impl App {
                     Ok(then(move |app| {
                         // Results for an older query than the one typed now are dropped.
                         let stale_search = matches!(&page.source, Source::Search(q) if *q != app.query.trim());
-                        if let (Source::Home, Body::Shelves(shelves)) = (&page.source, &page.body) {
-                            app.home = Some((shelves.clone(), Instant::now()));
-                        }
-                        let left_home = refresh && app.page.as_ref().is_none_or(|p| p.source != Source::Home);
-                        if left_home {
+                        app.kept.keep(&page);
+                        let left = in_place && app.page.as_ref().is_none_or(|p| p.source != page.source);
+                        if left {
                             app.loading = false;
                         } else if !stale_search {
                             app.show(page);
