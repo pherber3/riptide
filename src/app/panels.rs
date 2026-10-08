@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use egui::{Align, Color32, Key, Layout, RichText, Sense, Ui, Vec2, vec2};
 
-use super::{Action, App, SEARCH_PAUSE, Source, then};
+use super::{Action, App, SEARCH_PAUSE, Source};
 use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
@@ -42,12 +42,8 @@ impl App {
             });
         });
         if let Some((flow, pasted)) = finish {
-            (self.busy, self.message) = (true, None);
             let session = tidal::session_path(&self.data);
-            self.spawn(async move {
-                let tidal = flow.finish(&pasted, &session).await?;
-                Ok(then(move |app| app.signed_in(tidal)))
-            });
+            self.sign_in(async move { flow.finish(&pasted, &session).await });
         }
     }
 
@@ -307,8 +303,7 @@ impl App {
                 let full = ui.clip_rect();
                 let depth = (full.height() * 0.2).clamp(80.0, 180.0);
                 self.tide.paint(ui, egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom() - depth), full.max));
-                let minimized = ui.input(|i| i.viewport().minimized == Some(true));
-                if (playing || settling) && !self.hidden && !minimized {
+                if (playing || settling) && !self.out_of_sight() {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 }
             }

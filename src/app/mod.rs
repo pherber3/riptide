@@ -187,7 +187,7 @@ impl App {
         let (queue, restored) = Queue::load(&data.join("queue.json")).map_or((Queue::default(), None), |(q, at)| (q, Some(at)));
         let mut app = Self {
             themes,
-            busy: tidal::session_path(&data).exists(),
+            busy: false,
             lastfm: LastFm::load(LastFm::path(&data)),
             discord: Default::default(),
             tray: window::tray(&ctx),
@@ -231,12 +231,9 @@ impl App {
             app.run(async move { lastfm.scrobble(None).await });
         }
         app.scan_themes();
-        if app.busy {
-            let session = tidal::session_path(&app.data);
-            app.spawn(async move {
-                let tidal = Tidal::load(&session).await?;
-                Ok(then(move |app| app.signed_in(tidal)))
-            });
+        let session = tidal::session_path(&app.data);
+        if session.exists() {
+            app.sign_in(async move { Tidal::load(&session).await });
         }
         Ok(app)
     }
@@ -319,6 +316,20 @@ impl App {
 
     fn fail(&mut self, error: String) {
         (self.busy, self.loading, self.message) = (false, false, Some((error, true)));
+    }
+
+    /// Hidden in the tray or minimized: nothing drawn would be seen.
+    fn out_of_sight(&self) -> bool {
+        self.hidden || self.ctx.input(|i| i.viewport().minimized == Some(true))
+    }
+
+    /// Signs in with the account `signing` gives, showing that it's busy until then.
+    fn sign_in(&mut self, signing: impl Future<Output = Result<Tidal>> + Send + 'static) {
+        (self.busy, self.message) = (true, None);
+        self.spawn(async move {
+            let tidal = signing.await?;
+            Ok(then(move |app| app.signed_in(tidal)))
+        });
     }
 
     fn signed_in(&mut self, tidal: Tidal) {
@@ -573,8 +584,8 @@ impl eframe::App for App {
             self.apply(action);
         }
         // The clock moves once a second; open lyrics also wake for their next line. Nothing to
-        // redraw while the window is hidden in the tray.
-        if self.player.status.playing.load(Relaxed) && !self.hidden {
+        // redraw while the window can't be seen.
+        if self.player.status.playing.load(Relaxed) && !self.out_of_sight() {
             let position = self.player.status.position();
             let lyrics = self.lyrics.as_ref().and_then(|(_, l)| l.as_ref()).filter(|_| self.lyrics_open);
             let next_line = lyrics.and_then(|l| l.synced.iter().find(|(at, _)| *at > position)).map(|(at, _)| at - position);
