@@ -51,7 +51,7 @@ fn marker(path: &Path) -> PathBuf {
     path.with_extension("done")
 }
 
-pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
+fn create(path: &Path) -> io::Result<(Writer, Reader)> {
     let _ = fs::remove_file(marker(path));
     let file = File::create(path)?;
     let shared = Shared::default();
@@ -62,7 +62,7 @@ pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
 }
 
 /// A reader for a finished or in-progress download.
-pub fn open(path: &Path) -> Option<Reader> {
+fn open(path: &Path) -> Option<Reader> {
     if let Some((shared, _)) = ACTIVE.lock().unwrap().get(path) {
         return Some(Reader { file: File::open(path).ok()?, pos: 0, shared: shared.clone() });
     }

@@ -50,8 +50,8 @@ impl View {
 
     /// The row order for `items`, recomputed only when the filter, sort or list changes.
     pub fn rows<T: Sortable>(&mut self, items: &[T]) -> &[usize] {
-        let current = |b: &(String, Sort, bool, usize)| b.0 == self.filter && (b.1, b.2, b.3) == (self.sort, self.reverse, items.len());
-        if !self.built.as_ref().is_some_and(current) {
+        let key = (self.filter.clone(), self.sort, self.reverse, items.len());
+        if self.built.as_ref() != Some(&key) {
             let filter = self.filter.to_lowercase();
             self.rows = (0..items.len()).filter(|&i| filter.is_empty() || items[i].text().contains(&filter)).collect();
             if self.sort != Sort::Added {
@@ -60,7 +60,7 @@ impl View {
             if self.reverse {
                 self.rows.reverse();
             }
-            self.built = Some((self.filter.clone(), self.sort, self.reverse, items.len()));
+            self.built = Some(key);
         }
         &self.rows
     }

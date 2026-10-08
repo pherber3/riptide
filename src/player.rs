@@ -31,7 +31,7 @@ pub enum Event {
 /// What the UI reads without talking to the audio thread.
 pub struct Status {
     pub playing: AtomicBool,
-    pub volume: AtomicU32,
+    volume: AtomicU32,
     /// The playing track's normalization scale, as f32 bits.
     gain: AtomicU32,
     /// How loud the music last sent to the output was (RMS, before the volume), as f32 bits.

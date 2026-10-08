@@ -284,7 +284,7 @@ fn card(ui: &mut Ui, card: &Card, actions: &mut Vec<Action>) {
 }
 
 /// How to start a page's tracks from its header buttons.
-pub enum Start {
+enum Start {
     Play,
     Shuffle,
     Radio,
@@ -316,17 +316,12 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 // An artist is followed with a heart; an album or playlist is added to its list.
                 Some(item) => {
                     let on = library.saved.contains(item);
-                    let list = match item {
-                        Item::Album(_) => "Albums",
-                        Item::Playlist(_) => "Playlists",
-                        Item::Artist(_) | Item::Track(_) => "Artists",
+                    let (list, saved, unsaved) = match item {
+                        Item::Album(_) => ("Albums", Icon::Check, Icon::Plus),
+                        Item::Playlist(_) => ("Playlists", Icon::Check, Icon::Plus),
+                        Item::Artist(_) | Item::Track(_) => ("Artists", Icon::HeartFilled, Icon::Heart),
                     };
-                    let icon = match (item, on) {
-                        (Item::Artist(_) | Item::Track(_), true) => Icon::HeartFilled,
-                        (Item::Artist(_) | Item::Track(_), false) => Icon::Heart,
-                        (_, true) => Icon::Check,
-                        (_, false) => Icon::Plus,
-                    };
+                    let icon = if on { saved } else { unsaved };
                     let hint = if on { format!("Remove from your {list}") } else { format!("Add to your {list}") };
                     if icon_button(ui, icon, 22.0, if on { p().accent } else { p().secondary }).on_hover_text(hint).clicked() {
                         actions.push(Action::Save(item.clone(), !on));
@@ -468,7 +463,7 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
             rows.show(ui, tracks, order, *album_column, sorted, actions);
         }
         Body::Grid { cards, sorts } => {
-            if let Some(view) = view {
+            let order = view.as_mut().map(|view| {
                 ui.horizontal(|ui| {
                     filter_box(ui, view);
                     egui::ComboBox::from_id_salt("sort").selected_text(view.sort.label(view.reverse)).show_ui(ui, |ui| {
@@ -481,13 +476,12 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
                     });
                 });
                 ui.add_space(8.0);
-                order = Some(view.rows(cards));
-            }
+                view.rows(cards)
+            });
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 ordered(cards, order).for_each(|c| card(ui, c, actions));
             });
-            order = None;
         }
         Body::Settings => {}
         Body::Shelves(shelves) => {
@@ -717,37 +711,36 @@ impl Rows<'_> {
             });
         });
         ui.separator();
-        let item = menu_item;
         if self.queue {
             if i > 0 {
-                item(ui, actions, "Move up", Action::Move(i, i - 1));
+                menu_item(ui, actions, "Move up", Action::Move(i, i - 1));
             }
             if i + 1 < tracks.len() {
-                item(ui, actions, "Move down", Action::Move(i, i + 1));
+                menu_item(ui, actions, "Move down", Action::Move(i, i + 1));
             }
             if self.playing != Some(t.id) {
-                item(ui, actions, "Remove from queue", Action::Remove(i));
+                menu_item(ui, actions, "Remove from queue", Action::Remove(i));
             }
         } else {
-            item(ui, actions, "Play next", Action::Enqueue(t.clone(), true));
-            item(ui, actions, "Add to queue", Action::Enqueue(t.clone(), false));
+            menu_item(ui, actions, "Play next", Action::Enqueue(t.clone(), true));
+            menu_item(ui, actions, "Add to queue", Action::Enqueue(t.clone(), false));
         }
         if let Some(playlist) = self.editing {
-            item(ui, actions, "Remove from this playlist", Action::RemoveFromPlaylist(playlist.into(), i));
+            menu_item(ui, actions, "Remove from this playlist", Action::RemoveFromPlaylist(playlist.into(), i));
         }
         let config = egui::containers::menu::MenuConfig::new().close_behavior(KEEP_OPEN);
         egui::containers::menu::SubMenuButton::new("Add to playlist").config(config).ui(ui, |ui| self.add_to_playlist(ui, t.id, actions));
         let saved = self.library.saved.contains(&Item::Track(t.id));
         let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
-        item(ui, actions, collection, Action::Save(Item::Track(t.id), !saved));
-        item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
-        item(ui, actions, "Credits", Action::Credits(t.id, t.title.clone()));
-        item(ui, actions, "Copy link", Action::CopyLink(Item::Track(t.id).link()));
+        menu_item(ui, actions, collection, Action::Save(Item::Track(t.id), !saved));
+        menu_item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
+        menu_item(ui, actions, "Credits", Action::Credits(t.id, t.title.clone()));
+        menu_item(ui, actions, "Copy link", Action::CopyLink(Item::Track(t.id).link()));
         if let Some(id) = t.album_id {
-            item(ui, actions, "Go to album", Action::Open(Source::Album(id)));
+            menu_item(ui, actions, "Go to album", Action::Open(Source::Album(id)));
         }
         if let Some(id) = t.artist_id {
-            item(ui, actions, "Go to artist", Action::Open(Source::Artist(id)));
+            menu_item(ui, actions, "Go to artist", Action::Open(Source::Artist(id)));
         }
     }
 
