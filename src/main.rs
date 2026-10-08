@@ -27,8 +27,22 @@ use tidal::{Quality, Tidal};
 pub const CACHE_BYTES: u64 = 2 << 30;
 pub const ART_BYTES: u64 = 256 << 20;
 
+/// Where Riptide keeps its data and cache: beside the program on Windows, so one folder holds all
+/// of it; elsewhere in the usual per-user place, since the program's own folder may be read-only.
+fn home() -> Result<std::path::PathBuf> {
+    if cfg!(windows) {
+        return Ok(std::env::current_exe()?.parent().context("the program has no folder")?.into());
+    }
+    let user = std::path::PathBuf::from(std::env::var_os("HOME").context("no home folder")?);
+    Ok(if cfg!(target_os = "macos") {
+        user.join("Library/Application Support/Riptide")
+    } else {
+        std::env::var_os("XDG_DATA_HOME").map_or_else(|| user.join(".local/share"), Into::into).join("riptide")
+    })
+}
+
 fn main() -> Result<()> {
-    let dir = std::env::current_exe()?.parent().expect("exe has a directory").to_path_buf();
+    let dir = home()?;
     let data = dir.join("data");
     std::fs::create_dir_all(&data)?;
     let session = tidal::session_path(&data);

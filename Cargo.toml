@@ -3,6 +3,8 @@ name = "riptide"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "A small, fast desktop player for TIDAL"
+repository = "https://github.com/pherber3/riptide"
 
 [dependencies]
 anyhow = "1"

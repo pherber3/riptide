@@ -1,14 +1,15 @@
-# Builds Riptide and installs it to D:\Apps\Riptide, beside its data and cache. Close the app first.
+# Builds Riptide from source and installs it to a folder, with a Start menu shortcut. Its data and
+# cache are kept in the same folder. Close Riptide first.
+#
+#   .\install.ps1                      # to %LOCALAPPDATA%\Programs\Riptide
+#   .\install.ps1 -Dir D:\Apps\Riptide
+param([string]$Dir = "$env:LOCALAPPDATA\Programs\Riptide")
 $ErrorActionPreference = 'Stop'
-$env:RUSTUP_HOME = 'D:\dev\rust\rustup'
-$env:CARGO_HOME = 'D:\dev\rust\cargo'
-$env:PATH = "D:\dev\rust\cargo\bin;$env:PATH"
 cargo build --release --manifest-path "$PSScriptRoot\Cargo.toml"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-$dir = 'D:\Apps\Riptide'
-New-Item -ItemType Directory -Force $dir | Out-Null
-Copy-Item "$PSScriptRoot\target\release\riptide.exe" $dir -Force
+New-Item -ItemType Directory -Force $Dir | Out-Null
+Copy-Item "$PSScriptRoot\target\release\riptide.exe" $Dir -Force
 $link = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Riptide.lnk")
-$link.TargetPath = "$dir\riptide.exe"
-$link.WorkingDirectory = $dir
+$link.TargetPath = "$Dir\riptide.exe"
+$link.WorkingDirectory = $Dir
 $link.Save()

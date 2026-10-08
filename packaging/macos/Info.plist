@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Riptide</string>
+    <key>CFBundleDisplayName</key><string>Riptide</string>
+    <key>CFBundleIdentifier</key><string>io.github.pherber3.riptide</string>
+    <key>CFBundleExecutable</key><string>riptide</string>
+    <key>CFBundleIconFile</key><string>riptide</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSHumanReadableCopyright</key><string>MIT License. Not affiliated with TIDAL.</string>
+</dict>
+</plist>

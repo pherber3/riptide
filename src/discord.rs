@@ -1,7 +1,6 @@
 //! "Listening to Riptide" on the user's Discord profile, through the local connection the Discord
 //! app offers to other programs. Nothing is sent anywhere else, and without Discord nothing happens.
 
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
@@ -91,17 +90,34 @@ fn spawn() -> Sender<Value> {
     tx
 }
 
-fn connect() -> Option<File> {
+#[cfg(windows)]
+type Pipe = std::fs::File;
+#[cfg(unix)]
+type Pipe = std::os::unix::net::UnixStream;
+
+fn connect() -> Option<Pipe> {
     (0..10).find_map(|n| {
-        let mut pipe = File::options().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{n}")).ok()?;
+        let mut pipe = open(n)?;
         send(&mut pipe, 0, &json!({ "v": 1, "client_id": CLIENT_ID })).ok()?;
         Some(pipe)
     })
 }
 
+#[cfg(windows)]
+fn open(n: u32) -> Option<Pipe> {
+    Pipe::options().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{n}")).ok()
+}
+
+/// Discord's socket, in the first of the folders it may use that has one.
+#[cfg(unix)]
+fn open(n: u32) -> Option<Pipe> {
+    let dirs = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"].iter().filter_map(std::env::var_os).map(std::path::PathBuf::from);
+    dirs.chain([std::path::PathBuf::from("/tmp")]).find_map(|dir| Pipe::connect(dir.join(format!("discord-ipc-{n}"))).ok())
+}
+
 /// One message: its kind and length, then the JSON. Discord answers each; the answer is read so
 /// the pipe never fills.
-fn send(pipe: &mut File, op: u32, body: &Value) -> io::Result<()> {
+fn send(pipe: &mut Pipe, op: u32, body: &Value) -> io::Result<()> {
     let body = body.to_string();
     let mut frame = Vec::with_capacity(8 + body.len());
     frame.extend(op.to_le_bytes());

@@ -426,7 +426,8 @@ impl App {
                 self.ctx.copy_text(link);
                 self.note(Some("Link copied".into()));
             }
-            Action::ConnectLastFm => match self.lastfm.clone() {
+            // The key and secret are read again here, in case they were added since Riptide started.
+            Action::ConnectLastFm => match self.lastfm.clone().or_else(|| LastFm::load(LastFm::path(&self.data))) {
                 Some(lastfm) => {
                     self.note(Some("Approve Riptide in the Last.fm page that just opened".into()));
                     self.spawn(async move {

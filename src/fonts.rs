@@ -26,7 +26,8 @@ const FALLBACKS: &[&str] = &[];
 /// Inter, then the system fallbacks memory-mapped rather than read in: a CJK font is 10–20 MB,
 /// and mapped, only the glyphs actually drawn are ever paged in.
 pub fn install(ctx: &egui::Context) {
-    let mut fonts = fastframe_fonts::FontSetup::default().system_fallbacks(false).definitions();
+    // Elsewhere fastframe finds the system's own fallbacks.
+    let mut fonts = fastframe_fonts::FontSetup::default().system_fallbacks(!cfg!(windows)).definitions();
     let dir = std::path::Path::new(&std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into())).join("Fonts");
     for file in FALLBACKS {
         let Ok(handle) = std::fs::File::open(dir.join(file)) else { continue };
