@@ -56,8 +56,8 @@ fn card(ui: &mut Ui, card: &Card, actions: &mut Vec<Action>) {
         return;
     }
     let (image, round, title, subtitle) = match card {
-        Card::Album(a) if a.year.is_empty() => (tidal::image(a.cover.as_deref(), 320), false, a.title.clone(), a.artist.clone()),
-        Card::Album(a) => (tidal::image(a.cover.as_deref(), 320), false, a.title.clone(), format!("{} · {}", a.artist, a.year)),
+        Card::Album(a) if a.year().is_empty() => (tidal::image(a.cover.as_deref(), 320), false, a.title.clone(), a.artist.clone()),
+        Card::Album(a) => (tidal::image(a.cover.as_deref(), 320), false, a.title.clone(), format!("{} · {}", a.artist, a.year())),
         Card::Artist(a) => (tidal::image(a.picture.as_deref(), 320), true, a.name.clone(), "Artist".into()),
         Card::Playlist(p) => (tidal::image(p.cover.as_deref(), 320), false, p.title.clone(), format!("{} tracks", p.count)),
         Card::Mix(m) => (m.image.clone(), false, m.title.clone(), m.subtitle.clone()),
@@ -113,6 +113,20 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
             if head.radio.is_some() && pill(ui, Icon::Radio, "Radio", false).clicked() {
                 start = Some(Start::Radio);
             }
+            // An album's other editions, to switch to.
+            if let Some((_, others)) = &head.editions
+                && !others.is_empty()
+            {
+                let versions = egui::Button::new(RichText::new("Other versions").font(semibold(14.0)).color(p().text))
+                    .fill(p().surface)
+                    .corner_radius(20.0)
+                    .min_size(vec2(0.0, 40.0));
+                egui::containers::menu::MenuButton::from_button(versions).ui(ui, |ui| {
+                    for (name, to) in others {
+                        menu_item(ui, actions, name, Action::Open(to.clone()));
+                    }
+                });
+            }
             if let Some(item) = &head.item
                 && icon_button(ui, Icon::Copy, 20.0, p().secondary).on_hover_text("Copy link").clicked()
             {
@@ -155,6 +169,11 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 let line = |text: RichText| fitted(ui, text, width);
                 let title = line(RichText::new(&head.title).font(bold(40.0)).color(p().text));
                 let subtitle = (!byline.is_empty()).then(|| line(RichText::new(&byline).size(15.0).color(p().secondary)));
+                // The edition goes with the length, as "12 TRACKS (44:56) · HI-RES".
+                let length = match (length, &head.editions) {
+                    (Some(length), Some((edition, _))) => Some(format!("{length} · {}", edition.to_uppercase())),
+                    (length, _) => length,
+                };
                 let length = length.map(|length| line(RichText::new(length).font(semibold(12.0)).color(p().secondary)));
                 let gap = 8.0;
                 let height = [Some(&title), subtitle.as_ref(), length.as_ref()].into_iter().flatten().map(|l| l.size().y + gap).sum::<f32>() - gap;

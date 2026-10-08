@@ -89,14 +89,95 @@ pub struct Track {
     pub gain: Option<f32>,
 }
 
+/// One release of an album. Tidal lists each edition of an album (Hi-Res, Lossless, Dolby Atmos,
+/// explicit or clean) as a release of its own.
 #[derive(Clone, Debug)]
 pub struct Album {
     pub id: u64,
     pub title: String,
+    /// What sets the release apart beyond its edition, such as "Deluxe".
+    pub version: String,
     pub artist: String,
     pub artist_id: Option<u64>,
     pub cover: Option<String>,
-    pub year: String,
+    /// The release date, as YYYY-MM-DD.
+    pub released: String,
+    pub format: Format,
+    pub explicit: bool,
+}
+
+impl Album {
+    pub fn year(&self) -> &str {
+        self.released.get(..4).unwrap_or_default()
+    }
+
+    /// Another edition of the same release: the same artist, title, version and date.
+    pub fn same_release(&self, other: &Album) -> bool {
+        (self.artist_id, &self.title, &self.version, &self.released) == (other.artist_id, &other.title, &other.version, &other.released)
+    }
+
+    /// The order editions are chosen in: the best format first, then explicit before clean, as
+    /// the artist released it.
+    pub fn rank(&self) -> (Format, bool) {
+        (self.format, !self.explicit)
+    }
+
+    /// The edition's name, with whether it's explicit when that tells the editions apart.
+    pub fn edition(&self, explicit_varies: bool) -> String {
+        match (explicit_varies, self.explicit) {
+            (false, _) => self.format.name().into(),
+            (true, true) => format!("{} · Explicit", self.format.name()),
+            (true, false) => format!("{} · Clean", self.format.name()),
+        }
+    }
+}
+
+/// How an album edition sounds, in the order editions are chosen. Riptide plays a Dolby Atmos
+/// edition in stereo, as Tidal streams it to desktop apps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Format {
+    HiRes,
+    Lossless,
+    Atmos,
+    Standard,
+}
+
+impl Format {
+    fn of(v: &Value) -> Self {
+        let tags: Vec<_> = each(&v["mediaMetadata"]["tags"]).filter_map(Value::as_str).collect();
+        match () {
+            _ if tags.contains(&"HIRES_LOSSLESS") => Self::HiRes,
+            _ if tags.contains(&"LOSSLESS") => Self::Lossless,
+            _ if tags.contains(&"DOLBY_ATMOS") => Self::Atmos,
+            _ => Self::Standard,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::HiRes => "Hi-Res",
+            Self::Lossless => "Lossless",
+            Self::Atmos => "Dolby Atmos",
+            Self::Standard => "Standard",
+        }
+    }
+}
+
+/// One card per release: of an album's editions, the card keeps the one to open (see `Album::rank`).
+fn one_per_release(cards: Vec<Card>) -> Vec<Card> {
+    let mut out: Vec<Card> = Vec::with_capacity(cards.len());
+    for card in cards {
+        if let Card::Album(album) = &card
+            && let Some(Card::Album(kept)) = out.iter_mut().find(|c| matches!(c, Card::Album(k) if k.same_release(album)))
+        {
+            if album.rank() < kept.rank() {
+                *kept = album.clone();
+            }
+            continue;
+        }
+        out.push(card);
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -212,12 +293,18 @@ impl Shelf {
         self.cards.is_empty() && self.tracks.is_empty() && self.links.is_empty() && self.text.is_empty()
     }
 
+    /// The shelf as it shows, with one card per release, if it has anything to show.
+    fn done(mut self) -> Option<Self> {
+        self.cards = one_per_release(self.cards);
+        (!self.is_empty()).then_some(self)
+    }
+
     pub fn tracks(title: &str, tracks: Vec<Track>) -> Self {
         Self { tracks, ..Self::named(title) }
     }
 
     pub fn cards(title: &str, cards: Vec<Card>) -> Self {
-        Self { cards, ..Self::named(title) }
+        Self { cards: one_per_release(cards), ..Self::named(title) }
     }
 }
 
@@ -428,11 +515,28 @@ impl Tidal {
         Ok(shelves.into_iter().filter(|s| !s.is_empty()).collect())
     }
 
-    pub async fn album(&self, id: u64) -> Result<(Album, Vec<Track>)> {
+    /// An album, its tracks, and its editions (itself among them), best first. Tidal doesn't link
+    /// editions, so they are found among the artist's releases, while the tracks load.
+    pub async fn album(&self, id: u64) -> Result<(Album, Vec<Album>, Vec<Track>)> {
         let url = format!("{V1}/albums/{id}");
         let items = format!("{url}/items");
-        let (info, tracks) = tokio::try_join!(self.get(&url, &[]), self.items(&items, &[], 1000, track))?;
-        Ok((album(&info).context("bad album")?, tracks))
+        let about = async {
+            let info = self.get(&url, &[]).await?;
+            let this = album(&info).context("bad album")?;
+            let filter: &[(&str, &str)] = match info["type"].as_str() {
+                Some("EP" | "SINGLE") => &[("filter", "EPSANDSINGLES")],
+                _ => &[],
+            };
+            let releases = match this.artist_id {
+                Some(artist) => self.items(&format!("{V1}/artists/{artist}/albums"), filter, 200, album).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let mut editions: Vec<Album> = releases.into_iter().filter(|r| r.same_release(&this)).collect();
+            editions.sort_by_key(Album::rank);
+            anyhow::Ok((this, editions))
+        };
+        let ((album, editions), tracks) = tokio::try_join!(about, self.items(&items, &[], 1000, track))?;
+        Ok((album, editions, tracks))
     }
 
     /// An artist and their page: top tracks, releases by kind, similar artists and bio.
@@ -477,7 +581,7 @@ impl Tidal {
             for item in module["items"].as_array()? {
                 shelf.add(item["type"].as_str()?, &item["data"]);
             }
-            (!shelf.is_empty()).then_some(shelf)
+            shelf.done()
         });
         Ok(shelves.collect())
     }
@@ -505,7 +609,7 @@ impl Tidal {
                     _ => shelf.add(kind.trim_end_matches("_LIST"), item),
                 }
             }
-            (!shelf.is_empty()).then_some(shelf)
+            shelf.done()
         });
         Ok((text(&v["title"]), shelves.collect()))
     }
@@ -807,10 +911,13 @@ fn album(v: &Value) -> Option<Album> {
     Some(Album {
         id: v["id"].as_u64()?,
         title: text(&v["title"]),
+        version: text(&v["version"]),
         artist: text(&artist["name"]),
         artist_id: artist["id"].as_u64(),
         cover: image_id(&v["cover"]),
-        year: v["releaseDate"].as_str().unwrap_or_default().chars().take(4).collect(),
+        released: text(&v["releaseDate"]),
+        format: Format::of(v),
+        explicit: v["explicit"].as_bool().unwrap_or(false),
     })
 }
 

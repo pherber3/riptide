@@ -104,7 +104,7 @@ impl Sortable for Card {
     fn key(&self, sort: Sort) -> (u32, String) {
         let folder = u32::from(!matches!(self, Card::Folder { .. }));
         match (self, sort) {
-            (Card::Album(a), Sort::Year) => (u32::MAX - a.year.parse().unwrap_or(0), String::new()),
+            (Card::Album(a), Sort::Year) => (u32::MAX - a.year().parse().unwrap_or(0), String::new()),
             (Card::Album(a), Sort::Artist) => (folder, a.artist.to_lowercase()),
             _ => (folder, self.text()),
         }
