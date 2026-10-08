@@ -261,10 +261,10 @@ impl App {
     }
 
     /// A change to the library: after `task`, the library is fetched again, and so is the open page
-    /// when it is part of the collection (a playlist, a folder, the saved tracks, albums or artists).
-    fn changed(&self, task: impl Future<Output = Result<()>> + Send + 'static, notice: Option<String>) {
+    /// if the change `shows` on it.
+    fn changed(&self, task: impl Future<Output = Result<()>> + Send + 'static, notice: Option<String>, shows: impl Fn(&Source) -> bool) {
         let Some(tidal) = self.tidal.clone() else { return };
-        let source = self.page.as_ref().map(|p| p.source.clone()).filter(|s| s.sort_key().is_some());
+        let source = self.page.as_ref().map(|p| p.source.clone()).filter(|s| shows(s));
         self.spawn(async move {
             task.await?;
             let library = Library::load(&tidal).await?;

@@ -29,6 +29,11 @@ impl Library {
     }
 }
 
+/// Whether a page lists playlists, so changes to them show on it.
+fn in_folder(source: &Source) -> bool {
+    matches!(source, Source::Folder(..))
+}
+
 impl App {
     /// The open page's tracks, if it is this playlist.
     fn open_playlist(&mut self, id: &str) -> Option<&mut Vec<Track>> {
@@ -44,14 +49,23 @@ impl App {
         match action {
             Action::Save(item, on) => {
                 if on { self.library.saved.insert(item.clone()) } else { self.library.saved.remove(&item) };
-                let track = matches!(item, Item::Track(_));
+                // A track's heart changes nothing else; anything else shows in its list or the sidebar.
+                let list = match item {
+                    Item::Track(_) => None,
+                    Item::Album(_) => Some(Source::Albums),
+                    Item::Artist(_) => Some(Source::Artists),
+                    Item::Playlist(_) => Some(Source::playlists()),
+                };
                 let task = async move { tidal.set_saved(&item, on).await };
-                // A track's heart changes nothing else; anything else shows in a list or the sidebar.
-                if track { self.run(task) } else { self.changed(task, None) }
+                match list {
+                    None => self.run(task),
+                    Some(list) => self.changed(task, None, move |open| *open == list),
+                }
             }
             Action::AddToPlaylist(id, track) => {
                 let notice = self.library.playlists.iter().find(|p| p.id == id).map(|p| format!("Added to {}", p.title));
-                self.changed(async move { tidal.add_to_playlist(&id, track).await }, notice);
+                let playlist = Source::Playlist(id.clone());
+                self.changed(async move { tidal.add_to_playlist(&id, track).await }, notice, move |open| *open == playlist || in_folder(open));
             }
             Action::RemoveFromPlaylist(id, index) => {
                 if let Some(tracks) = self.open_playlist(&id).filter(|t| index < t.len()) {
@@ -66,14 +80,14 @@ impl App {
                 }
                 self.run(async move { tidal.move_in_playlist(&id, from, to).await });
             }
-            Action::MovePlaylist(id, folder) => self.changed(async move { tidal.arrange("move", &format!("playlist:{id}"), Some(&folder)).await }, None),
+            Action::MovePlaylist(id, folder) => self.changed(async move { tidal.arrange("move", &format!("playlist:{id}"), Some(&folder)).await }, None, in_folder),
             Action::DeletePlaylist(id) => {
                 if self.open_playlist(&id).is_some() {
                     self.step(true);
                 }
-                self.changed(async move { tidal.arrange("remove", &format!("playlist:{id}"), None).await }, Some("Playlist deleted".into()));
+                self.changed(async move { tidal.arrange("remove", &format!("playlist:{id}"), None).await }, Some("Playlist deleted".into()), in_folder);
             }
-            Action::DeleteFolder(id) => self.changed(async move { tidal.delete_folder(&id).await }, Some("Folder deleted".into())),
+            Action::DeleteFolder(id) => self.changed(async move { tidal.delete_folder(&id).await }, Some("Folder deleted".into()), in_folder),
             _ => {}
         }
     }
@@ -86,6 +100,10 @@ impl App {
         let notice = match target {
             Target::Create(_) | Target::CreateFolder => format!("Created {title}"),
             Target::Rename(_) | Target::RenameFolder(_) => format!("Renamed to {title}"),
+        };
+        let renamed = match &target {
+            Target::Rename(id) => Some(Source::Playlist(id.clone())),
+            _ => None,
         };
         let task = async move {
             match target {
@@ -101,6 +119,6 @@ impl App {
                 Target::RenameFolder(id) => tidal.rename_folder(&id, &title).await,
             }
         };
-        self.changed(task, Some(notice));
+        self.changed(task, Some(notice), move |open| renamed.as_ref() == Some(open) || in_folder(open));
     }
 }
