@@ -133,6 +133,8 @@ pub struct App {
     tide: crate::widgets::Tide,
     /// The seek bar's position while it is being dragged.
     dragging: Option<f64>,
+    /// The volume before muting, which unmuting goes back to.
+    unmuted: Option<f32>,
     tray: Option<fastframe_tray::Tray>,
     hidden: bool,
     quitting: bool,
@@ -219,6 +221,7 @@ impl App {
             lyrics: None,
             lyric_line: None,
             tide: Default::default(),
+            unmuted: None,
             dragging: None,
             hidden: false,
             quitting: false,
@@ -331,9 +334,11 @@ impl App {
     /// Shows a newly loaded page, in its kind's remembered sort, and files the old one in history.
     fn show(&mut self, mut page: Page) {
         page.view = page.source.sort_key().map(|key| View::new(key, self.settings.sorts.get(key).copied().unwrap_or_default()));
-        // Results that refine the ones showing replace them, so typing doesn't fill the history.
+        // The page showing, opened again, is refreshed in place; results that refine the ones showing
+        // replace them, so typing doesn't fill the history.
+        let same = self.page.as_ref().is_some_and(|p| p.source == page.source);
         let refining = [Some(&page.source), self.page.as_ref().map(|p| &p.source)].iter().all(|s| matches!(s, Some(Source::Search(_))));
-        if refining {
+        if same || refining {
             self.page = Some(page);
         } else if let Some(old) = self.page.replace(page) {
             self.back.push(old);

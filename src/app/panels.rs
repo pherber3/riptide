@@ -247,7 +247,12 @@ impl App {
                         status.set_volume(self.settings.volume * self.settings.volume);
                     }
                     save = slider.drag_stopped() || slider.clicked();
-                    ui.add(if self.settings.volume > 0.0 { Icon::Volume } else { Icon::Muted }.image(p().secondary, 18.0));
+                    let muted = self.settings.volume == 0.0;
+                    if icon_button(ui, if muted { Icon::Muted } else { Icon::Volume }, 18.0, p().secondary).on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
+                        self.settings.volume = if muted { self.unmuted.take().unwrap_or(0.5) } else { self.unmuted = Some(self.settings.volume); 0.0 };
+                        status.set_volume(self.settings.volume * self.settings.volume);
+                        save = true;
+                    }
                     ui.add_space(6.0);
                     for (open, icon, hint, action) in [(self.queue_open, Icon::Queue, "Queue", Action::Queue), (self.lyrics_open, Icon::Lyrics, "Lyrics", Action::Lyrics)] {
                         if icon_button(ui, icon, 18.0, if open { p().accent } else { p().secondary }).on_hover_text(hint).clicked() {
@@ -418,8 +423,15 @@ impl App {
                     self.search_due = Some(0.0);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, Icon::Settings, 20.0, p().secondary).on_hover_text("Settings").clicked() {
-                        actions.push(Action::Open(Source::Settings));
+                    // On the settings page the button closes it, back to where it was opened from.
+                    let in_settings = self.page.as_ref().is_some_and(|p| p.source == Source::Settings);
+                    let (icon, hint) = if in_settings { (Icon::Close, "Close settings") } else { (Icon::Settings, "Settings") };
+                    if icon_button(ui, icon, 20.0, p().secondary).on_hover_text(hint).clicked() {
+                        actions.push(match (in_settings, self.back.is_empty()) {
+                            (false, _) => Action::Open(Source::Settings),
+                            (true, false) => Action::Step(true),
+                            (true, true) => Action::Open(Source::Home),
+                        });
                     }
                     ui.add_space(8.0);
                     if self.loading {
