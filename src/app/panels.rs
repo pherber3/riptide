@@ -7,7 +7,8 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
 use crate::tidal::{self, Card, Item, Lyrics, Quality};
-use crate::widgets::{List, Rows, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
+use super::views::{List, Rows, heart, link_to, menu_item, playlist_actions};
+use crate::widgets::{bar, clickable, clock, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -404,7 +405,7 @@ impl App {
             let Some(page) = &mut self.page else { return };
             let list = editing.as_deref().map_or(List::Tracks, List::Playlist);
             let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list };
-            let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::widgets::page(ui, page, &rows, actions));
+            let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| super::views::page(ui, page, &rows, actions));
             if let Some(color) = tint {
                 let rect = egui::Rect::from_min_size(full.min - vec2(0.0, scrolled.state.offset.y), vec2(full.width(), 460.0));
                 ui.painter().set(glow, egui::Shape::gradient_rect(rect, egui::Direction::TopDown, [color.gamma_multiply(0.6), Color32::TRANSPARENT]));

@@ -2,6 +2,7 @@ mod library;
 mod page;
 mod panels;
 mod playback;
+mod views;
 mod window;
 
 use std::future::Future;
