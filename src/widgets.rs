@@ -17,6 +17,25 @@ pub fn tier_choice(ui: &mut Ui, quality: Quality, chosen: Quality) -> Response {
     ui.add(egui::Button::selectable(quality == chosen, RichText::new(quality.name()).color(tier_color(quality))))
 }
 
+/// A tier to choose from a menu: a radio button, the tier's badge and what it streams, the whole
+/// row clickable.
+pub fn tier_row(ui: &mut Ui, quality: Quality, chosen: Quality) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 6.0, p().surface_hover);
+    }
+    let (center, color) = (pos2(rect.left() + 16.0, rect.center().y), tier_color(quality));
+    ui.painter().circle_stroke(center, 7.0, Stroke::new(1.5, if quality == chosen { color } else { p().secondary }));
+    if quality == chosen {
+        ui.painter().circle_filled(center, 3.5, color);
+    }
+    let layout = egui::UiBuilder::new().max_rect(rect.with_min_x(rect.left() + 34.0)).layout(Layout::left_to_right(Align::Center));
+    let mut row = ui.new_child(layout);
+    row.add(tier_badge(quality).min_size(vec2(46.0, 0.0)).sense(Sense::hover()));
+    row.label(RichText::new(quality.about()).size(13.0).color(p().secondary));
+    clickable(response)
+}
+
 pub fn tier_color(quality: Quality) -> Color32 {
     match quality {
         Quality::Max => GOLD,

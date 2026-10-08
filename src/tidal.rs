@@ -55,6 +55,15 @@ impl Quality {
         }
     }
 
+    /// What the tier streams.
+    pub fn about(self) -> &'static str {
+        match self {
+            Self::Max => "Up to 24-bit, 192 kHz FLAC",
+            Self::High => "16-bit, 44.1 kHz FLAC (CD quality)",
+            Self::Low => "AAC, 320 kbps",
+        }
+    }
+
     fn api(self) -> &'static str {
         match self {
             Self::Low => "HIGH",

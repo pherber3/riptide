@@ -100,12 +100,7 @@ fn cards(ui: &mut Ui, s: &mut Settings, themes: &Catalog<Palette>, lastfm_user: 
         row(ui, "Tide", "Waves along the bottom of the lyrics view that rise and roll with the music", |ui| switch(ui, &mut s.tide));
     });
     card(ui, "Playback", |ui| {
-        let detail = match s.quality {
-            Quality::Max => "Up to 24-bit, 192 kHz FLAC",
-            Quality::High => "16-bit, 44.1 kHz FLAC (CD quality)",
-            Quality::Low => "AAC, 320 kbps",
-        };
-        row(ui, "Streaming quality", detail, |ui| {
+        row(ui, "Streaming quality", s.quality.about(), |ui| {
             for q in Quality::ALL.into_iter().rev() {
                 if tier_choice(ui, q, s.quality).clicked() {
                     actions.push(Action::Quality(q));
