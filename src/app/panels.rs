@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use egui::{Align, Color32, Key, Layout, RichText, Sense, Ui, Vec2, vec2};
 
-use super::{Action, App, Body, SEARCH_PAUSE, Source, then};
+use super::{Action, App, SEARCH_PAUSE, Source, then};
 use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
@@ -405,11 +405,12 @@ impl App {
             // The page's artwork colour glows down from the top and scrolls away with the page. It is
             // drawn first, behind everything, once the scroll position is known.
             let glow = ui.painter().add(egui::Shape::Noop);
-            let cover = self.page.as_ref().and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());
+            let cover = self.page.as_ref().filter(|_| !self.settings_open).and_then(|p| p.head.as_ref()?.art.as_ref()?.0.as_deref());
             let tint = cover.and_then(crate::art::tint);
             let full = ui.clip_rect();
             ui.horizontal(|ui| {
-                for (icon, enabled, back) in [(Icon::Back, !self.back.is_empty(), true), (Icon::Forward, !self.forward.is_empty(), false)] {
+                let back = self.settings_open || !self.back.is_empty();
+                for (icon, enabled, back) in [(Icon::Back, back, true), (Icon::Forward, !self.forward.is_empty(), false)] {
                     if ui.add_enabled_ui(enabled, |ui| icon_button(ui, icon, 20.0, p().secondary)).inner.clicked() {
                         actions.push(Action::Step(back));
                     }
@@ -423,15 +424,9 @@ impl App {
                     self.search_due = Some(0.0);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // On the settings page the button closes it, back to where it was opened from.
-                    let in_settings = self.page.as_ref().is_some_and(|p| p.source == Source::Settings);
-                    let (icon, hint) = if in_settings { (Icon::Close, "Close settings") } else { (Icon::Settings, "Settings") };
+                    let (icon, hint) = if self.settings_open { (Icon::Close, "Close settings") } else { (Icon::Settings, "Settings") };
                     if icon_button(ui, icon, 20.0, p().secondary).on_hover_text(hint).clicked() {
-                        actions.push(match (in_settings, self.back.is_empty()) {
-                            (false, _) => Action::Open(Source::Settings),
-                            (true, false) => Action::Step(true),
-                            (true, true) => Action::Open(Source::Home),
-                        });
+                        actions.push(Action::Settings);
                     }
                     ui.add_space(8.0);
                     if self.loading {
@@ -447,16 +442,15 @@ impl App {
                 Some(Source::Playlist(id)) if self.library.mine(id) => Some(id.clone()),
                 _ => None,
             };
-            let lastfm_user = self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.clone());
+            if self.settings_open {
+                let lastfm_user = self.lastfm.as_ref().and_then(|l| l.session.as_ref()).map(|(_, user)| user.as_str());
+                let home = self.data.parent().unwrap_or(&self.data);
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::settings::page(ui, &mut self.settings, &self.themes, lastfm_user, home, actions));
+                return;
+            }
             let Some(page) = &mut self.page else { return };
             let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, editing: editing.as_deref(), queue: false };
-            let (settings, home) = (&mut self.settings, self.data.parent().unwrap_or(&self.data));
-            let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                crate::widgets::page(ui, page, &rows, actions);
-                if matches!(page.body, Body::Settings) {
-                    crate::settings::page(ui, settings, &self.themes, lastfm_user.as_deref(), home, actions);
-                }
-            });
+            let scrolled = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| crate::widgets::page(ui, page, &rows, actions));
             if let Some(color) = tint {
                 let rect = egui::Rect::from_min_size(full.min - vec2(0.0, scrolled.state.offset.y), vec2(full.width(), 460.0));
                 ui.painter().set(glow, egui::Shape::gradient_rect(rect, egui::Direction::TopDown, [color.gamma_multiply(0.6), Color32::TRANSPARENT]));

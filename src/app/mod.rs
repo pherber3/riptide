@@ -81,6 +81,8 @@ pub enum Action {
     ResetSort,
     /// Back (true) or forward through history.
     Step(bool),
+    /// Open or close the settings.
+    Settings,
     Quality(Quality),
     /// Show or hide the queue panel.
     Queue,
@@ -125,6 +127,8 @@ pub struct App {
     dialog: Option<Dialog>,
     queue_open: bool,
     lyrics_open: bool,
+    /// The settings show in place of the page.
+    settings_open: bool,
     /// Lyrics for a track id; None while they load.
     lyrics: Option<(u64, Option<Lyrics>)>,
     lyric_line: Option<usize>,
@@ -216,6 +220,7 @@ impl App {
             dialog: None,
             queue_open: false,
             lyrics_open: false,
+            settings_open: false,
             lyrics: None,
             lyric_line: None,
             tide: Default::default(),
@@ -345,7 +350,8 @@ impl App {
             }
         }
         self.forward.clear();
-        self.loading = false;
+        // A page opened from the settings takes their place.
+        (self.loading, self.settings_open) = (false, false);
     }
 
     /// Steps through history like a browser.
@@ -381,9 +387,6 @@ impl App {
         match action {
             Action::Open(source) => {
                 (self.loading, self.message, self.lyrics_open) = (true, None, false);
-                if source == Source::Settings {
-                    self.scan_themes();
-                }
                 self.spawn(async move {
                     let page = load(tidal, source).await?;
                     // Results for an older query than the one typed now are dropped.
@@ -468,9 +471,17 @@ impl App {
                     self.settings.save(&self.data);
                 }
             }
+            // Back from the settings closes them.
+            Action::Step(_) if self.settings_open => self.settings_open = false,
             Action::Step(back) => {
                 self.lyrics_open = false;
                 self.step(back);
+            }
+            Action::Settings => {
+                (self.settings_open, self.lyrics_open) = (!self.settings_open, false);
+                if self.settings_open {
+                    self.scan_themes();
+                }
             }
             Action::Quality(quality) => {
                 self.settings.quality = quality;
@@ -551,7 +562,7 @@ impl eframe::App for App {
             self.sidebar(ui, &mut actions);
             self.queue_panel(ui, &mut actions);
             // What the settings page changes takes effect, and is kept.
-            let before = self.page.as_ref().is_some_and(|p| p.source == Source::Settings).then(|| self.settings.clone());
+            let before = self.settings_open.then(|| self.settings.clone());
             self.content(ui, &mut actions);
             if let Some(before) = before.filter(|before| *before != self.settings) {
                 if before.device != self.settings.device {

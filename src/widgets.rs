@@ -483,7 +483,6 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
                 ordered(cards, order).for_each(|c| card(ui, c, actions));
             });
         }
-        Body::Settings => {}
         Body::Shelves(shelves) => {
             for (n, shelf) in shelves.iter().enumerate() {
                 shelf_title(ui, &shelf.title, shelf.more.as_deref(), actions);

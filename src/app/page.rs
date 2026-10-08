@@ -23,7 +23,6 @@ pub enum Source {
     Artists,
     TrackRadio(u64),
     ArtistRadio(u64),
-    Settings,
     /// A browse page by its path: Explore, a genre, a "View all" (see `Tidal::page`).
     Page(String),
 }
@@ -89,8 +88,6 @@ pub enum Body {
     Tracks { tracks: Vec<Track>, album_column: bool },
     Grid { cards: Vec<Card>, sorts: &'static [Sort] },
     Shelves(Vec<Shelf>),
-    /// Drawn by the app from its own state rather than loaded.
-    Settings,
 }
 
 impl Body {
@@ -99,7 +96,7 @@ impl Body {
         match self {
             Self::Tracks { tracks, .. } => tracks,
             Self::Shelves(shelves) => shelves.iter().find(|s| !s.tracks.is_empty()).map_or(&[], |s| &s.tracks),
-            Self::Grid { .. } | Self::Settings => &[],
+            Self::Grid { .. } => &[],
         }
     }
 }
@@ -160,8 +157,6 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             (Head::title("Artists"), Body::Grid { cards, sorts: NAME_SORTS })
         }
         Source::Folder(id, name) => (Head::title(name.clone()), Body::Grid { cards: tidal.folder(id).await?, sorts: NAME_SORTS }),
-        // The settings page draws its own title, centred with its cards.
-        Source::Settings => (None, Body::Settings),
         Source::Page(path) => {
             let (title, mut shelves) = tidal.page(path).await?;
             // A page of one list ("View all") shows as a grid or a track list under that list's name.
