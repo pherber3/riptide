@@ -2,7 +2,7 @@
 
 A small, fast desktop player for TIDAL, written in Rust.
 
-![Riptide playing a playlist](assets/screenshot.png)
+![Riptide's home page](assets/screenshot.webp)
 
 TIDAL's own desktop app is a web app in a window: several processes and around half a gigabyte of
 memory to play music. Riptide is one native program. On the same Windows PC, playing the same
