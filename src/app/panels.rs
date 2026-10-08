@@ -6,7 +6,7 @@ use super::{Action, App, SEARCH_PAUSE, Source};
 use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{p, Icon, bold, semibold};
-use crate::tidal::{self, Card, Item, Quality};
+use crate::tidal::{self, Card, Item, Lyrics, Quality};
 use crate::widgets::{List, Rows, bar, clickable, clock, heart, icon_button, link_text, link_to, menu_item, nav_item, picture, pill, play_disc, playlist_actions, search_field, section, tier_color};
 
 /// A playlist being dragged in the sidebar: id and title.
@@ -301,20 +301,11 @@ impl App {
 
     /// The playing track's artwork and lyrics over the whole window, in the artwork's colour.
     pub(super) fn now_playing(&mut self, ui: &mut Ui, mood: Option<Color32>, actions: &mut Vec<Action>) {
-        let (soft, faint) = (Color32::from_white_alpha(180), Color32::from_white_alpha(110));
+        let soft = Color32::from_white_alpha(180);
         let frame = egui::Frame::new().fill(mood.unwrap_or(p().panel)).inner_margin(egui::Margin { left: 56, right: 40, top: 16, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if self.settings.tide {
-                // It moves while the music plays and settles once it stops.
-                let playing = self.player.status.playing.load(Relaxed);
-                let level = if playing { self.player.status.level() } else { 0.0 };
-                let settling = self.tide.step(level, ui.input(|i| i.stable_dt).min(0.1));
-                let full = ui.clip_rect();
-                let depth = (full.height() * 0.2).clamp(80.0, 180.0);
-                self.tide.paint(ui, egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom() - depth), full.max));
-                if (playing || settling) && !self.out_of_sight() {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
-                }
+                self.paint_tide(ui);
             }
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if icon_button(ui, Icon::Down, 24.0, soft).on_hover_text("Close (Esc)").clicked() {
@@ -340,63 +331,26 @@ impl App {
                 });
                 ui.add_space(64.0);
                 let lyrics = self.lyrics.as_ref().filter(|(id, _)| *id == t.id).and_then(|(_, l)| l.as_ref());
-                let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-                // The lyrics stay beside the cover, top to bottom, the playing line level with its middle.
                 ui.vertical(|ui| {
                     ui.add_space(top);
-                    scroll.max_height(side).show(ui, |ui| {
-                        let from = ui.clip_rect().top();
-                        // The same fade at both ends; the top one slides in as the lyrics scroll, so
-                        // the first line starts in full beside the cover's top.
-                        let fade = side * 0.22;
-                        let unscrolled = (fade - (from - ui.cursor().top())).max(0.0);
-                        // Laid out without a colour and painted in the one for where it lands, so the
-                        // fade never re-shapes the text.
-                        let lyric = |ui: &mut Ui, text: RichText, color: Color32| {
-                            let galley = egui::WidgetText::from(text.color(Color32::PLACEHOLDER)).into_galley(ui, Some(egui::TextWrapMode::Wrap), ui.available_width(), egui::TextStyle::Body);
-                            let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
-                            if ui.is_rect_visible(rect) {
-                                let y = rect.center().y;
-                                let f = ((y - from + unscrolled) / fade).min((from + side - y) / fade).clamp(0.0, 1.0);
-                                ui.painter().galley(rect.min, galley, color.gamma_multiply(f * f * (3.0 - 2.0 * f)));
-                            }
-                            response
-                        };
-                        match lyrics {
-                            None => {
-                                ui.spinner();
-                            }
-                            Some(l) if l.synced.is_empty() && l.text.is_empty() => {
-                                ui.label(RichText::new("No lyrics for this track.").font(bold(34.0)).color(soft));
-                            }
-                            Some(l) if l.synced.is_empty() => {
-                                for words in l.text.lines() {
-                                    lyric(ui, RichText::new(words).font(semibold(24.0)), Color32::WHITE);
-                                }
-                            }
-                            Some(l) => {
-                                let position = self.player.status.position();
-                                let now = l.synced.iter().rposition(|(at, _)| *at <= position);
-                                for (n, (at, words)) in l.synced.iter().enumerate() {
-                                    let color = if Some(n) == now { Color32::WHITE } else { faint };
-                                    let words = if words.is_empty() { "♪" } else { words };
-                                    let response = lyric(ui, RichText::new(words).font(bold(34.0)), color);
-                                    if Some(n) == now && self.lyric_line != now {
-                                        response.scroll_to_me(Some(Align::Center));
-                                    }
-                                    if clickable(response).clicked() {
-                                        actions.push(Action::Seek(*at));
-                                    }
-                                    ui.add_space(18.0);
-                                }
-                                self.lyric_line = now;
-                            }
-                        }
-                        ui.add_space(side / 2.0);
-                    })
+                    lyric_column(ui, lyrics, self.player.status.position(), &mut self.lyric_line, side, actions);
                 });
             });
         });
+    }
+
+    /// The tide along the bottom of the lyrics view. It moves while the music plays and settles
+    /// once it stops.
+    fn paint_tide(&mut self, ui: &mut Ui) {
+        let playing = self.player.status.playing.load(Relaxed);
+        let level = if playing { self.player.status.level() } else { 0.0 };
+        let settling = self.tide.step(level, ui.input(|i| i.stable_dt).min(0.1));
+        let full = ui.clip_rect();
+        let depth = (full.height() * 0.2).clamp(80.0, 180.0);
+        self.tide.paint(ui, egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom() - depth), full.max));
+        if (playing || settling) && !self.out_of_sight() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        }
     }
 
     pub(super) fn content(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -457,4 +411,59 @@ impl App {
             }
         });
     }
+}
+
+/// The lyrics beside the cover, from its top to its bottom, the playing line level with its middle:
+/// they fade toward both ends (the top fade slides in as they scroll, so the first line starts in
+/// full), and a click on a line plays from there.
+fn lyric_column(ui: &mut Ui, lyrics: Option<&Lyrics>, position: f64, shown: &mut Option<usize>, side: f32, actions: &mut Vec<Action>) {
+    let (soft, faint) = (Color32::from_white_alpha(180), Color32::from_white_alpha(110));
+    let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    scroll.max_height(side).show(ui, |ui| {
+        let from = ui.clip_rect().top();
+        let fade = side * 0.22;
+        let unscrolled = (fade - (from - ui.cursor().top())).max(0.0);
+        // Laid out without a colour and painted in the one for where it lands, so the
+        // fade never re-shapes the text.
+        let lyric = |ui: &mut Ui, text: RichText, color: Color32| {
+            let galley = egui::WidgetText::from(text.color(Color32::PLACEHOLDER)).into_galley(ui, Some(egui::TextWrapMode::Wrap), ui.available_width(), egui::TextStyle::Body);
+            let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+            if ui.is_rect_visible(rect) {
+                let y = rect.center().y;
+                let f = ((y - from + unscrolled) / fade).min((from + side - y) / fade).clamp(0.0, 1.0);
+                ui.painter().galley(rect.min, galley, color.gamma_multiply(f * f * (3.0 - 2.0 * f)));
+            }
+            response
+        };
+        match lyrics {
+            None => {
+                ui.spinner();
+            }
+            Some(l) if l.synced.is_empty() && l.text.is_empty() => {
+                ui.label(RichText::new("No lyrics for this track.").font(bold(34.0)).color(soft));
+            }
+            Some(l) if l.synced.is_empty() => {
+                for words in l.text.lines() {
+                    lyric(ui, RichText::new(words).font(semibold(24.0)), Color32::WHITE);
+                }
+            }
+            Some(l) => {
+                let now = l.synced.iter().rposition(|(at, _)| *at <= position);
+                for (n, (at, words)) in l.synced.iter().enumerate() {
+                    let color = if Some(n) == now { Color32::WHITE } else { faint };
+                    let words = if words.is_empty() { "♪" } else { words };
+                    let response = lyric(ui, RichText::new(words).font(bold(34.0)), color);
+                    if Some(n) == now && *shown != now {
+                        response.scroll_to_me(Some(Align::Center));
+                    }
+                    if clickable(response).clicked() {
+                        actions.push(Action::Seek(*at));
+                    }
+                    ui.add_space(18.0);
+                }
+                *shown = now;
+            }
+        }
+        ui.add_space(side / 2.0);
+    });
 }
