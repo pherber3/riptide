@@ -111,14 +111,14 @@ impl ImageLoader for Art {
         }
         entries.insert(uri.into(), Entry::Pending);
         let path = self.dir.join(name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "_"));
-        let (http, entries, ctx, uri) = (&*crate::tidal::HTTP, self.entries.clone(), ctx.clone(), uri.to_string());
+        let (entries, ctx, uri) = (self.entries.clone(), ctx.clone(), uri.to_string());
         self.rt.spawn(async move {
             // File work and decoding run on the blocking pool, off the async workers.
             let cached = path.clone();
             let mut image = tokio::task::spawn_blocking(move || decode(&std::fs::read(cached).ok()?)).await.ok().flatten();
             let fetch = |uri: String| async move {
                 let _permit = FETCHES.acquire().await;
-                http.get(&uri).send().await?.error_for_status()?.bytes().await
+                crate::tidal::fetch(uri).await
             };
             // New artwork (a playlist just made) can be missing at the bigger sizes for a while.
             let smaller = uri.rsplit_once('/').filter(|(_, file)| *file != "320x320.jpg").map(|(base, _)| format!("{base}/320x320.jpg"));

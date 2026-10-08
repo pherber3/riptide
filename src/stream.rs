@@ -6,7 +6,7 @@ use anyhow::Result;
 use futures_util::{StreamExt, stream};
 
 use crate::cache::{self, Reader, Writer};
-use crate::tidal::{HTTP, Parts, Quality, Tidal};
+use crate::tidal::{self, HTTP, Parts, Quality, Tidal};
 
 /// Hi-res segments fetched at once; more barely helps and just competes with everything else.
 const PARALLEL: usize = 4;
@@ -35,18 +35,17 @@ pub async fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Resu
 }
 
 async fn fetch(parts: &Parts, w: &mut Writer) -> Result<()> {
-    let http = &*HTTP;
     match parts {
         Parts::Urls(urls) => {
             for url in urls {
-                let mut resp = http.get(url).send().await?.error_for_status()?;
+                let mut resp = HTTP.get(url).send().await?.error_for_status()?;
                 while let Some(chunk) = resp.chunk().await? {
                     w.append(&chunk)?;
                 }
             }
         }
         Parts::Segments { init, template, start, count } => {
-            let init = http.get(init).send().await?.error_for_status()?.bytes().await?;
+            let init = tidal::fetch(init).await?;
             // Hi-res FLAC arrives as fragmented MP4. Rewrap it as a native FLAC stream so it
             // decodes progressively; symphonia's MP4 reader wants the whole file first, so
             // anything else (AAC on tracks without FLAC) is played once fully downloaded.
@@ -61,10 +60,7 @@ async fn fetch(parts: &Parts, w: &mut Writer) -> Result<()> {
             // A few segments in flight at once, written in order.
             anyhow::ensure!(*count > 0, "the stream manifest lists no segments");
             let mut segments = stream::iter(*start..start + count)
-                .map(|n| async move {
-                    let resp = http.get(template.replace("$Number$", &n.to_string())).send().await?;
-                    anyhow::Ok(resp.error_for_status()?.bytes().await?)
-                })
+                .map(|n| tidal::fetch(template.replace("$Number$", &n.to_string())))
                 .buffered(PARALLEL);
             while let Some(segment) = segments.next().await {
                 let segment = segment?;

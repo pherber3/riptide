@@ -29,6 +29,11 @@ pub static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     builder.build().expect("HTTP client")
 });
 
+/// A plain download (a stream segment, artwork), failing on an error status.
+pub async fn fetch(url: impl reqwest::IntoUrl) -> reqwest::Result<bytes::Bytes> {
+    HTTP.get(url).send().await?.error_for_status()?.bytes().await
+}
+
 /// Tidal's tiers: Low is AAC, High is 16-bit lossless FLAC, Max is hi-res FLAC.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Quality {
