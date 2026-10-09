@@ -177,6 +177,8 @@ pub fn logo(size: usize) -> Vec<u8> {
 pub fn install(ctx: &egui::Context, palette: Palette) {
     egui_extras::install_image_loaders(ctx);
     fastframe_icons::install::<Icon>(ctx);
+    // A wheel notch scrolls half as far again as egui's 40 points.
+    ctx.options_mut(|o| o.input_options.line_scroll_speed = 60.0);
     apply(ctx, palette);
 }
 
