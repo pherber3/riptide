@@ -151,13 +151,19 @@ fn set_playing(status: &Status, output: &mut Output<Sink>, play: bool) {
 
 fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) -> Result<()> {
     let consumer = Arc::new(Mutex::new(rtrb::RingBuffer::new(1).1));
+    // The chosen device, or when it can't be opened (unplugged, turned off), the system default.
     let open = |device: Option<String>| {
-        let options = OutputOptions {
-            device: device.map_or(Device::Default, Device::Named),
-            buffer: Buffer::FixedOnWindows(BufferSize::Duration(Duration::from_millis(100))),
-            ..Default::default()
+        let output = |device: Device| {
+            let buffer = Buffer::FixedOnWindows(BufferSize::Duration(Duration::from_millis(100)));
+            Output::open(OutputOptions { device, buffer, ..Default::default() }, Sink { rx: consumer.clone(), status: status.clone() })
         };
-        Output::open(options, Sink { rx: consumer.clone(), status: status.clone() })
+        match device {
+            Some(name) => output(Device::Named(name.clone())).or_else(|e| {
+                events(Event::Error(format!("{name} isn't available, so the system default plays: {e:#}")));
+                output(Device::Default)
+            }),
+            None => output(Device::Default),
+        }
     };
     let mut output = open(device)?;
     output.pause();
@@ -234,7 +240,14 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             }
             Ok(Cmd::Device(device)) => {
                 let at = status.position();
-                output = open(device)?;
+                output = match open(device) {
+                    Ok(output) => output,
+                    // Not even the default opens: the device playing now carries on.
+                    Err(e) => {
+                        events(Event::Error(format!("audio output: {e:#}")));
+                        continue;
+                    }
+                };
                 set_playing(&status, &mut output, status.playing.load(Relaxed));
                 format = (output.sample_rate(), usize::from(output.channels()));
                 reformat(&mut track, at, format)?;

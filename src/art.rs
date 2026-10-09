@@ -8,8 +8,12 @@ use egui::{Color32, ColorImage};
 enum Entry {
     Pending,
     Ready(Arc<ColorImage>),
-    Failed,
+    /// When it failed; it is tried again once `RETRY` has passed.
+    Failed(std::time::Instant),
 }
+
+/// How long artwork that couldn't be had (a dropped connection) waits before it is tried again.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Loads Tidal artwork through a disk cache, decoding off the UI thread. Each decoded image is
 /// handed to egui's texture cache once and then dropped, and textures not drawn for a while are let
@@ -96,8 +100,8 @@ impl ImageLoader for Art {
                 return Ok(ImagePoll::Ready { image });
             }
             Some(Entry::Pending) => return Ok(ImagePoll::Pending { size: None }),
-            Some(Entry::Failed) => return Err(LoadError::Loading("artwork unavailable".into())),
-            None => {}
+            Some(Entry::Failed(at)) if at.elapsed() < RETRY => return Err(LoadError::Loading("artwork unavailable".into())),
+            Some(Entry::Failed(_)) | None => {}
         }
         entries.insert(uri.into(), Entry::Pending);
         let path = self.dir.join(name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "_"));
@@ -129,7 +133,7 @@ impl ImageLoader for Art {
             if let Some(image) = &image {
                 SHOWN.lock().unwrap().insert(uri.clone(), (mood(image), ctx.input(|i| i.time)));
             }
-            let entry = image.map_or(Entry::Failed, |image| Entry::Ready(Arc::new(image)));
+            let entry = image.map_or_else(|| Entry::Failed(std::time::Instant::now()), |image| Entry::Ready(Arc::new(image)));
             entries.lock().unwrap().insert(uri, entry);
             ctx.request_repaint();
         });

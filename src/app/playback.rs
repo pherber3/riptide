@@ -15,10 +15,16 @@ use crate::tidal;
 
 impl App {
     pub(super) fn play(&mut self, index: usize) {
+        self.play_at(index, None);
+    }
+
+    /// Plays the track at `index`, or with `resume`, picks it up at that position, playing or
+    /// paused: a track reloaded in another quality, or the queue restored from last time.
+    pub(super) fn play_at(&mut self, index: usize, resume: Option<(f64, bool)>) {
         let Some(tidal) = self.tidal.clone() else { return };
         self.restored = None;
-        // Reloading the same track in another quality is still the same listen.
-        if self.resume_at.is_none() {
+        // Picking a track up again is still the same listen.
+        if resume.is_none() {
             self.scrobble();
         }
         self.queue.index = Some(index);
@@ -30,28 +36,28 @@ impl App {
         let evicting = dir.clone();
         self.rt.spawn_blocking(move || cache::evict(&evicting, crate::CACHE_BYTES));
         self.spawn(async move {
-            let reader = crate::stream::track(&tidal, &dir, id, quality).await?;
+            let reader = crate::stream::track(&tidal, &dir, id, quality)?;
             // Download the next track once this one is in, so it starts instantly without slowing this one.
             if let Some(next) = next {
                 let download = reader.download();
                 tokio::spawn(async move {
                     download.finished().await;
-                    crate::stream::track(&tidal, &dir, next, quality).await
+                    crate::stream::track(&tidal, &dir, next, quality)
                 });
             }
             // Opening reads the stream's first bytes, so it happens here rather than on the audio thread.
             let decoder = tokio::task::spawn_blocking(move || Decoder::open(reader)).await??;
-            Ok(then(move |app| app.ready(id, Box::new(decoder))))
+            Ok(then(move |app| app.ready(id, Box::new(decoder), resume)))
         });
     }
 
     /// A track opened and ready: it plays (or waits, paused, after a quality change), and its listen begins.
-    fn ready(&mut self, id: u64, decoder: Box<Decoder>) {
+    fn ready(&mut self, id: u64, decoder: Box<Decoder>, resume: Option<(f64, bool)>) {
         if self.queue.current().is_none_or(|t| t.id != id) {
             return;
         }
         self.apply_gain();
-        let (at, play) = self.resume_at.take().map_or((None, true), |(at, play)| (Some(at), play));
+        let (at, play) = resume.map_or((None, true), |(at, play)| (Some(at), play));
         self.player.send(Cmd::Load(decoder, play));
         if let Some(seconds) = at {
             self.player.send(Cmd::Seek(seconds));

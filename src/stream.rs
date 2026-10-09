@@ -11,26 +11,19 @@ use crate::tidal::{self, HTTP, Parts, Quality, Tidal};
 /// Hi-res segments fetched at once; more barely helps and just competes with everything else.
 const PARALLEL: usize = 4;
 
-/// Serialises starting downloads, so two requests for one track (prefetch, then play) can't both start it.
-static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// A reader for a track, downloading it into the cache unless it is already there or on its way.
-pub async fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Result<Reader> {
+/// A failed download (the stream refused, the network gone) fails its reader.
+pub fn track(tidal: &Tidal, dir: &Path, id: u64, quality: Quality) -> Result<Reader> {
     let path = cache::path(dir, id, quality);
-    if let Some(reader) = cache::open(&path) {
-        return Ok(reader);
+    let (reader, writer) = cache::open(&path)?;
+    if let Some(mut writer) = writer {
+        let tidal = tidal.clone();
+        let task = tokio::spawn(async move {
+            let result = async { fetch(&tidal.stream(id, quality).await?, &mut writer).await }.await;
+            writer.finish(result.map_err(|e| format!("{e:#}")));
+        });
+        cache::running(&path, task.abort_handle());
     }
-    let _starting = STARTING.lock().await;
-    if let Some(reader) = cache::open(&path) {
-        return Ok(reader);
-    }
-    let parts = tidal.stream(id, quality).await?;
-    let (mut writer, reader) = cache::create(&path)?;
-    let task = tokio::spawn(async move {
-        let result = fetch(&parts, &mut writer).await;
-        writer.finish(result.map_err(|e| e.to_string()));
-    });
-    cache::running(&path, task.abort_handle());
     Ok(reader)
 }
 

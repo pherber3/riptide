@@ -194,7 +194,6 @@ pub struct Playlist {
     pub title: String,
     pub cover: Option<String>,
     pub count: u64,
-    pub description: Prose,
 }
 
 /// A paragraph or more about an artist or playlist: runs of text, some linking to an artist or album.
@@ -571,9 +570,12 @@ impl Tidal {
             editions.sort_by_key(|e| e.edition.rank());
             anyhow::Ok((this, editions))
         };
-        let items = format!("{url}/items");
-        let ((album, editions), tracks) = tokio::try_join!(about, self.items(&items, &[], 1000, track))?;
+        let ((album, editions), tracks) = tokio::try_join!(about, self.album_tracks(id))?;
         Ok((album, editions, tracks))
+    }
+
+    pub async fn album_tracks(&self, id: u64) -> Result<Vec<Track>> {
+        self.items(&format!("{V1}/albums/{id}/items"), &[], 1000, track).await
     }
 
     /// An artist, their bio, and their page: top tracks, releases by kind and similar artists.
@@ -601,11 +603,12 @@ impl Tidal {
         Ok((artist(&info?).context("bad artist")?, bio, shelves.into_iter().filter(|s| !s.is_empty()).collect()))
     }
 
-    pub async fn playlist(&self, id: &str) -> Result<(Playlist, Vec<Track>)> {
+    /// A playlist, its description and its tracks.
+    pub async fn playlist(&self, id: &str) -> Result<(Playlist, Prose, Vec<Track>)> {
         let url = format!("{V1}/playlists/{id}");
         let items = format!("{url}/items");
         let (info, tracks) = tokio::try_join!(self.get(&url, &[]), self.items(&items, &[], 10_000, track))?;
-        Ok((playlist(&info).context("bad playlist")?, tracks))
+        Ok((playlist(&info).context("bad playlist")?, Prose::parse(&text(&info["description"]), String::new()), tracks))
     }
 
     /// Tidal's personal home feed: recently played, your top playlists, mixes and the rest.
@@ -962,6 +965,5 @@ fn playlist(v: &Value) -> Option<Playlist> {
         title: text(&v["title"]),
         cover: image_id(&v["squareImage"]).or_else(|| image_id(&v["image"])),
         count: v["numberOfTracks"].as_u64().unwrap_or(0),
-        description: Prose::parse(&text(&v["description"]), String::new()),
     })
 }

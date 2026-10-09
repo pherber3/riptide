@@ -208,19 +208,21 @@ impl Kept {
 pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
     let tracks = |tracks, album_column| Body::Tracks { tracks, album_column };
     let (head, body) = match &source {
-        Source::Home => match tidal.home().await {
-            Ok(shelves) if !shelves.is_empty() => (None, Body::Shelves(shelves)),
-            _ => return Box::pin(load(tidal, Source::playlists())).await,
+        // A new account's Home has nothing on it yet: its playlists show instead.
+        Source::Home => match tidal.home().await? {
+            shelves if shelves.is_empty() => return Box::pin(load(tidal, Source::playlists())).await,
+            shelves => (None, Body::Shelves(shelves)),
         },
         Source::Search(query) => (Head::title(format!("Results for “{query}”")), Body::Shelves(tidal.search(query).await?)),
         Source::Album(id) => {
-            let (mut album, mut editions, mut list) = tidal.album(*id).await?;
+            let (mut album, editions, mut list) = tidal.album(*id).await?;
             // Riptide plays Dolby Atmos in stereo, so an Atmos edition (reached from one of its tracks)
             // gives way to a stereo edition when there is one, and isn't offered as a choice.
             if album.edition.atmos
-                && let Some(stereo) = editions.first().filter(|e| !e.edition.atmos).map(|e| e.id)
+                && let Some(stereo) = editions.first().filter(|e| !e.edition.atmos)
             {
-                (album, editions, list) = tidal.album(stereo).await?;
+                list = tidal.album_tracks(stereo.id).await?;
+                album = stereo.clone();
             }
             let explicit_varies = editions.iter().any(|e| e.edition.explicit) && editions.iter().any(|e| !e.edition.explicit);
             let others = editions.iter().filter(|e| e.id != album.id && !e.edition.atmos).map(|e| (e.edition, Source::Album(e.id))).collect();
@@ -241,12 +243,9 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             (Some(head), Body::Shelves(shelves))
         }
         Source::Playlist(id) => {
-            let (playlist, list) = tidal.playlist(id).await?;
+            let (playlist, about, list) = tidal.playlist(id).await?;
             let art = Some((tidal::image(playlist.cover.as_deref(), 640), false));
-            (
-                Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, about: playlist.description, art, ..Default::default() }),
-                tracks(list, true),
-            )
+            (Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, about, art, ..Default::default() }), tracks(list, true))
         }
         Source::Mix(mix) => {
             let head = Head { title: mix.title.clone(), subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), ..Default::default() };

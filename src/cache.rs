@@ -59,28 +59,27 @@ fn marker(path: &Path) -> PathBuf {
     path.with_extension("done")
 }
 
-/// Starts a new download into `path`, with a reader for it.
-pub fn create(path: &Path) -> io::Result<(Writer, Reader)> {
+/// A reader for the file at `path`: finished, still downloading, or, when it is neither, a new
+/// download, with the writer to fill it. All in one step, so two readers asking at once (prefetch,
+/// then play) share one download.
+pub fn open(path: &Path) -> io::Result<(Reader, Option<Writer>)> {
+    let mut active = ACTIVE.lock().unwrap();
+    if let Some((shared, _)) = active.get(path) {
+        return Ok((Reader { file: File::open(path)?, pos: 0, shared: shared.clone() }, None));
+    }
+    if marker(path).exists()
+        && let Ok(file) = File::open(path)
+    {
+        let written = file.metadata()?.len();
+        let shared = Shared { progress: Mutex::new(Progress { written, done: true, failed: None }), ..Default::default() };
+        return Ok((Reader { file, pos: 0, shared: Arc::new(shared) }, None));
+    }
     let _ = fs::remove_file(marker(path));
     let file = File::create(path)?;
     let shared = Arc::new(Shared::default());
     let reader = Reader { file: File::open(path)?, pos: 0, shared: shared.clone() };
-    ACTIVE.lock().unwrap().insert(path.into(), (shared.clone(), None));
-    Ok((Writer { file, shared, path: path.into(), held: None, result: Err("download cancelled".into()) }, reader))
-}
-
-/// A reader for a finished or in-progress download.
-pub fn open(path: &Path) -> Option<Reader> {
-    if let Some((shared, _)) = ACTIVE.lock().unwrap().get(path) {
-        return Some(Reader { file: File::open(path).ok()?, pos: 0, shared: shared.clone() });
-    }
-    if !marker(path).exists() {
-        return None;
-    }
-    let file = File::open(path).ok()?;
-    let written = file.metadata().ok()?.len();
-    let shared = Shared { progress: Mutex::new(Progress { written, done: true, failed: None }), ..Default::default() };
-    Some(Reader { file, pos: 0, shared: Arc::new(shared) })
+    active.insert(path.into(), (shared.clone(), None));
+    Ok((reader, Some(Writer { file, shared, path: path.into(), held: None, result: Err("download cancelled".into()) })))
 }
 
 /// Notes the task downloading into `path`, so `keep_only` can cancel it.

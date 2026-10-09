@@ -166,7 +166,7 @@ impl App {
     /// The playing track's cover, title, artist and where it is playing from, each a link.
     fn playing_now(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let Some(t) = self.queue.current() else { return };
-        let cover = picture(ui, tidal::image(t.cover.as_deref(), 160), 56.0, false);
+        let cover = picture(ui, tidal::image(t.cover.as_deref(), 160), 56.0, false).interact(Sense::click());
         if cover.hovered() {
             ui.painter().rect_filled(cover.rect, 6.0, Color32::from_black_alpha(90));
         }
@@ -439,7 +439,7 @@ fn padded(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 /// The lyrics beside the cover, from its top to its bottom, the playing line level with its middle:
 /// they fade toward both ends (the top fade slides in as they scroll, so the first line starts in
 /// full), and a click on a line plays from there.
-fn lyric_column(ui: &mut Ui, lyrics: Option<&Lyrics>, position: f64, shown: &mut Option<usize>, side: f32, actions: &mut Vec<Action>) {
+fn lyric_column(ui: &mut Ui, lyrics: Option<&Result<Lyrics, String>>, position: f64, shown: &mut Option<usize>, side: f32, actions: &mut Vec<Action>) {
     let (soft, faint) = (Color32::from_white_alpha(180), Color32::from_white_alpha(110));
     let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
     scroll.max_height(side).show(ui, |ui| {
@@ -463,15 +463,18 @@ fn lyric_column(ui: &mut Ui, lyrics: Option<&Lyrics>, position: f64, shown: &mut
             None => {
                 ui.spinner();
             }
-            Some(l) if l.synced.is_empty() && l.text.is_empty() => {
+            Some(Err(_)) => {
+                ui.label(RichText::new("Couldn't load the lyrics.").font(bold(34.0)).color(soft));
+            }
+            Some(Ok(l)) if l.synced.is_empty() && l.text.is_empty() => {
                 ui.label(RichText::new("No lyrics for this track.").font(bold(34.0)).color(soft));
             }
-            Some(l) if l.synced.is_empty() => {
+            Some(Ok(l)) if l.synced.is_empty() => {
                 for words in l.text.lines() {
                     lyric(ui, RichText::new(words).font(semibold(24.0)), Color32::WHITE);
                 }
             }
-            Some(l) => {
+            Some(Ok(l)) => {
                 let now = l.synced.iter().rposition(|(at, _)| *at <= position);
                 for (n, (at, words)) in l.synced.iter().enumerate() {
                     let color = if Some(n) == now { Color32::WHITE } else { faint };

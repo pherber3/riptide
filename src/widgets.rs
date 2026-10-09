@@ -156,8 +156,10 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> Response
     clickable(response)
 }
 
+/// Artwork in the layout. It takes no clicks, so a click on it reaches what it sits in (a track
+/// row); `.interact(Sense::click())` makes it a button of its own.
 pub fn picture(ui: &mut Ui, url: Option<String>, side: f32, round: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
     paint_picture(ui, url, rect, round);
     response
 }

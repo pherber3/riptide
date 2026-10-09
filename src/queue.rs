@@ -20,7 +20,8 @@ pub struct Queue {
     pub tracks: Vec<Track>,
     pub index: Option<usize>,
     pub repeat: Repeat,
-    /// The order before shuffling, while shuffle is on.
+    /// The order before shuffling, while shuffle is on. It gains and loses tracks with the queue,
+    /// so turning shuffle off gives back the same tracks.
     unshuffled: Option<Vec<Track>>,
     /// The page it was played from, and that page's title.
     #[serde(default)]
@@ -78,8 +79,11 @@ impl Queue {
             (self.tracks, self.unshuffled, self.from) = (vec![track], None, None);
             return false;
         };
+        // Unshuffled, it lands in the same place: after the current track, or at the end.
+        let current = self.tracks[i].id;
         if let Some(order) = &mut self.unshuffled {
-            order.push(track.clone());
+            let at = if next { order.iter().position(|t| t.id == current).map_or(order.len(), |c| c + 1) } else { order.len() };
+            order.insert(at, track.clone());
         }
         let at = if next { i + 1 } else { self.tracks.len() };
         self.tracks.insert(at, track);
@@ -98,7 +102,12 @@ impl Queue {
     }
 
     pub fn remove(&mut self, i: usize) {
-        self.tracks.remove(i);
+        let gone = self.tracks.remove(i);
+        if let Some(order) = &mut self.unshuffled
+            && let Some(at) = order.iter().position(|t| t.id == gone.id)
+        {
+            order.remove(at);
+        }
         self.index = self.index.map(|c| if i < c { c - 1 } else { c });
     }
 
@@ -113,6 +122,9 @@ impl Queue {
         let known: HashSet<u64> = self.tracks.iter().map(|t| t.id).collect();
         let first = self.tracks.len();
         self.tracks.extend(tracks.into_iter().filter(|t| !known.contains(&t.id)));
+        if let Some(order) = &mut self.unshuffled {
+            order.extend_from_slice(&self.tracks[first..]);
+        }
         (self.tracks.len() > first).then_some(first)
     }
 

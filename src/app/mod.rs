@@ -125,8 +125,6 @@ pub struct App {
     queue: Queue,
     /// Where the restored queue's current track was left, until it plays again.
     restored: Option<f64>,
-    /// Where to pick the current track up once it loads, and whether it should be playing.
-    resume_at: Option<(f64, bool)>,
     /// The track being listened to and when it started (Unix seconds), to scrobble when it ends.
     listening: Option<(Track, u64)>,
     library: Library,
@@ -135,8 +133,8 @@ pub struct App {
     lyrics_open: bool,
     /// The settings show in place of the page.
     settings_open: bool,
-    /// Lyrics for a track id; None while they load.
-    lyrics: Option<(u64, Option<Lyrics>)>,
+    /// Lyrics for a track id: None while they load, or why they couldn't be had.
+    lyrics: Option<(u64, Option<Result<Lyrics, String>>)>,
     lyric_line: Option<usize>,
     tide: crate::widgets::Tide,
     /// The seek bar's position while it is being dragged.
@@ -221,7 +219,6 @@ impl App {
             search_due: None,
             queue,
             restored,
-            resume_at: None,
             listening: None,
             library: Library::default(),
             dialog: None,
@@ -483,10 +480,7 @@ impl App {
             }
             // A queue restored from last time starts where it was left.
             Action::Toggle => match (self.restored, self.queue.index) {
-                (Some(at), Some(i)) => {
-                    self.resume_at = Some((at, true));
-                    self.play(i);
-                }
+                (Some(at), Some(i)) => self.play_at(i, Some((at, true))),
                 _ => self.player.send(Cmd::Toggle),
             },
             Action::Next => self.next(),
@@ -524,12 +518,18 @@ impl App {
                 // Reload the current track in the new quality, as it was: same spot, playing or
                 // paused. A track restored from last time isn't loaded yet, so it just waits.
                 if let (None, Some(i)) = (self.restored, self.queue.index) {
-                    self.resume_at = Some((self.player.status.position(), self.player.status.playing.load(Relaxed)));
-                    self.play(i);
+                    let status = &self.player.status;
+                    self.play_at(i, Some((status.position(), status.playing.load(Relaxed))));
                 }
             }
             Action::Queue => self.queue_open = !self.queue_open,
-            Action::Lyrics => (self.lyrics_open, self.lyric_line) = (!self.lyrics_open, None),
+            Action::Lyrics => {
+                (self.lyrics_open, self.lyric_line) = (!self.lyrics_open, None);
+                // Lyrics that couldn't be had are asked for again.
+                if matches!(self.lyrics, Some((_, Some(Err(_))))) {
+                    self.lyrics = None;
+                }
+            }
             library => self.edit(tidal, library),
         }
     }
@@ -625,7 +625,7 @@ impl App {
         {
             self.lyrics = Some((id, None));
             self.spawn(async move {
-                let lyrics = tidal.lyrics(id).await?;
+                let lyrics = tidal.lyrics(id).await.map_err(|e| format!("{e:#}"));
                 Ok(then(move |app| (app.lyrics, app.lyric_line) = (Some((id, Some(lyrics))), None)))
             });
         }
@@ -646,7 +646,7 @@ impl App {
     fn wake_while_playing(&self) {
         if self.player.status.playing.load(Relaxed) && !self.out_of_sight() {
             let position = self.player.status.position();
-            let lyrics = self.lyrics.as_ref().and_then(|(_, l)| l.as_ref()).filter(|_| self.lyrics_open);
+            let lyrics = self.lyrics.as_ref().and_then(|(_, l)| l.as_ref()?.as_ref().ok()).filter(|_| self.lyrics_open);
             let next_line = lyrics.and_then(|l| l.synced.iter().find(|(at, _)| *at > position)).map(|(at, _)| at - position);
             self.ctx.request_repaint_after(Duration::from_secs_f64(next_line.unwrap_or(1.0).clamp(0.02, 1.0)));
         }
