@@ -326,7 +326,7 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
                     });
                 }
                 if !shelf.tracks.is_empty() {
-                    rows.show(ui, &shelf.tracks, None, true, None, actions);
+                    ui.push_id(("shelf", n), |ui| rows.show(ui, &shelf.tracks, None, true, None, actions));
                 }
             }
         }
