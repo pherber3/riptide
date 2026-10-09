@@ -411,7 +411,7 @@ impl App {
                 egui::ScrollArea::vertical()
                     .id_salt("settings")
                     .auto_shrink(false)
-                    .show(ui, |ui| crate::settings::page(ui, &mut self.settings, &self.themes, lastfm_user, &self.data, actions));
+                    .show(ui, |ui| padded(ui, |ui| crate::settings::page(ui, &mut self.settings, &self.themes, lastfm_user, &self.data, actions)));
                 return;
             }
             let mut area = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
@@ -421,7 +421,7 @@ impl App {
             let Some(page) = &mut self.page else { return };
             let list = editing.as_deref().map_or(List::Tracks, List::Playlist);
             let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list };
-            let scrolled = area.show(ui, |ui| super::views::page(ui, page, &rows, actions));
+            let scrolled = area.show(ui, |ui| padded(ui, |ui| super::views::page(ui, page, &rows, actions)));
             page.scroll = scrolled.state.offset.y;
             if let Some(color) = tint {
                 let rect = egui::Rect::from_min_size(full.min - vec2(0.0, scrolled.state.offset.y), vec2(full.width(), 460.0));
@@ -429,6 +429,11 @@ impl App {
             }
         });
     }
+}
+
+/// A page's content, kept clear of the scrollbar beside it.
+fn padded(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new().inner_margin(egui::Margin { right: 16, ..Default::default() }).show(ui, add);
 }
 
 /// The lyrics beside the cover, from its top to its bottom, the playing line level with its middle:

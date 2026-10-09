@@ -224,15 +224,17 @@ pub fn apply(ctx: &egui::Context, c: Palette) {
         s.spacing.button_padding = vec2(12.0, 7.0);
         s.spacing.interact_size.y = 28.0;
         s.spacing.menu_margin = egui::Margin::same(6);
-        // A slim, quiet scrollbar in its own gutter, so it never covers what is at the right edge; a
-        // little wider and brighter only while in use.
+        // A scrollbar in its own gutter, so it never covers what is at the right edge: faint but
+        // always there, in the text's colour so it shows on any background, and wider and brighter
+        // while in use.
         s.spacing.scroll = egui::style::ScrollStyle {
             floating_allocated_width: 12.0,
-            bar_width: 6.0,
-            floating_width: 3.0,
-            foreground_color: false,
-            active_handle_opacity: 0.5,
-            interact_handle_opacity: 0.8,
+            bar_width: 8.0,
+            floating_width: 6.0,
+            foreground_color: true,
+            dormant_handle_opacity: 0.2,
+            active_handle_opacity: 0.35,
+            interact_handle_opacity: 0.55,
             ..egui::style::ScrollStyle::floating()
         };
         s.text_styles.insert(TextStyle::Body, FontId::proportional(14.0));
