@@ -149,7 +149,7 @@ fn set_playing(status: &Status, output: &mut Output<Sink>, play: bool) {
     if play { output.resume() } else { output.pause() }
 }
 
-fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) -> Result<()> {
+fn run(mut device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, events: &impl Fn(Event)) -> Result<()> {
     let consumer = Arc::new(Mutex::new(rtrb::RingBuffer::new(1).1));
     // The chosen device, or when it can't be opened (unplugged, turned off), the system default.
     let open = |device: Option<String>| {
@@ -165,7 +165,7 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             None => output(Device::Default),
         }
     };
-    let mut output = open(device)?;
+    let mut output = open(device.clone())?;
     output.pause();
     // The output's rate and channels, which change when it moves to another device.
     let mut format = (output.sample_rate(), usize::from(output.channels()));
@@ -203,7 +203,31 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             None => Ok(()),
         }
     };
+    // A fresh output on `device`, the track carried over to its format from `at`: for another
+    // device, or to let go of a `held` moment.
+    let reopen = |output: &mut Output<Sink>, format: &mut (u32, usize), track: &mut Option<Track>, device: Option<String>, at: f64| -> Result<()> {
+        match open(device) {
+            Ok(fresh) => *output = fresh,
+            // Not even the default opens: the output there is carries on.
+            Err(e) => {
+                events(Event::Error(format!("audio output: {e:#}")));
+                return Ok(());
+            }
+        }
+        set_playing(&status, output, status.playing.load(Relaxed));
+        let fresh = (output.sample_rate(), usize::from(output.channels()));
+        if fresh != *format {
+            *format = fresh;
+            reformat(track, at, fresh)?;
+        }
+        Ok(())
+    };
     let mut track: Option<Track> = None;
+    // A paused output keeps a moment of what it was playing, which resuming sounds. After a pause or
+    // stop that moment is held: the right thing to resume, but not once playback jumps (another
+    // track, a seek), when a fresh output plays instead. A track's ending is never held, as it is
+    // what comes before the next track.
+    let mut held = false;
     loop {
         // Wake when about half the buffered audio has played (commands still wake at once).
         let per_second = status.samples_per_second.load(Relaxed).max(1);
@@ -227,30 +251,27 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
                 let empty = Vec::new;
                 track = Some(Track { decoder, resampler, tx: ring(0.0, format), mapped: empty(), ready: empty(), sent: 0, ended: false });
                 status.set_pending_seek(None);
+                if std::mem::take(&mut held) {
+                    reopen(&mut output, &mut format, &mut track, device.clone(), 0.0)?;
+                }
                 set_playing(&status, &mut output, play);
             }
-            Ok(Cmd::Toggle) if track.is_some() => set_playing(&status, &mut output, !status.playing.load(Relaxed)),
+            Ok(Cmd::Toggle) if track.is_some() => {
+                held = status.playing.load(Relaxed);
+                set_playing(&status, &mut output, !held);
+            }
             // The seek happens below, as soon as the track has downloaded far enough.
             Ok(Cmd::Seek(seconds)) if track.is_some() => status.set_pending_seek(Some(seconds)),
             Ok(Cmd::Stop) => {
                 track = None;
                 status.set_pending_seek(None);
                 ring(0.0, format);
+                held |= status.playing.load(Relaxed);
                 set_playing(&status, &mut output, false);
             }
-            Ok(Cmd::Device(device)) => {
-                let at = status.position();
-                output = match open(device) {
-                    Ok(output) => output,
-                    // Not even the default opens: the device playing now carries on.
-                    Err(e) => {
-                        events(Event::Error(format!("audio output: {e:#}")));
-                        continue;
-                    }
-                };
-                set_playing(&status, &mut output, status.playing.load(Relaxed));
-                format = (output.sample_rate(), usize::from(output.channels()));
-                reformat(&mut track, at, format)?;
+            Ok(Cmd::Device(chosen)) => {
+                (device, held) = (chosen, false);
+                reopen(&mut output, &mut format, &mut track, device.clone(), status.position())?;
             }
             Ok(Cmd::Toggle | Cmd::Seek(_)) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
@@ -266,6 +287,9 @@ fn run(device: Option<String>, rx: mpsc::Receiver<Cmd>, status: Arc<Status>, eve
             && t.decoder.can_seek()
         {
             seek(t, seconds, format)?;
+            if std::mem::take(&mut held) {
+                reopen(&mut output, &mut format, &mut track, device.clone(), seconds)?;
+            }
         }
         let Some(t) = track.as_mut().filter(|_| status.playing.load(Relaxed)) else { continue };
         if let Err(e) = fill(t, format.1) {
