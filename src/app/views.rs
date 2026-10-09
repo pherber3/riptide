@@ -388,7 +388,8 @@ fn cell<R>(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&mut Ui) -> R)
 /// How track rows behave: what is playing, what is saved, and whether this list is the queue or
 /// one of the user's playlists (by id), whose tracks can be removed and rearranged.
 pub struct Rows<'a> {
-    pub playing: Option<u64>,
+    /// The track playing, and the colour that marks it (see `playing_color`).
+    pub playing: Option<(u64, Color32)>,
     pub library: &'a Library,
     pub list: List<'a>,
 }
@@ -462,13 +463,13 @@ impl Rows<'_> {
                 if hovered {
                     ui.painter().rect_filled(rect, 6.0, p().surface);
                 }
-                let playing = self.playing == Some(t.id);
+                let playing = self.playing.filter(|(id, _)| *id == t.id).map(|(_, color)| color);
                 ui.horizontal(|ui| {
                     cell(ui, NUMBER, height, |ui| {
                         if hovered {
                             ui.add(Icon::Play.image(p().text, 14.0));
-                        } else if playing {
-                            ui.add(Icon::Playing.image(p().accent, 16.0));
+                        } else if let Some(color) = playing {
+                            ui.add(Icon::Playing.image(color, 16.0));
                         } else {
                             ui.label(RichText::new((pos + 1).to_string()).color(p().dim));
                         }
@@ -480,7 +481,7 @@ impl Rows<'_> {
                                     picture(ui, tidal::image(t.cover.as_deref(), 80), THUMB, false);
                                     ui.add_space(4.0);
                                 }
-                                let title = RichText::new(&t.title).font(medium(14.0)).color(if playing { p().accent } else { p().text });
+                                let title = RichText::new(&t.title).font(medium(14.0)).color(playing.unwrap_or(p().text));
                                 ui.add(egui::Label::new(title).truncate().selectable(false));
                             }
                             Sort::Artist => link_to(ui, &t.artist, t.artist_id.map(Source::Artist), actions),
@@ -541,7 +542,7 @@ impl Rows<'_> {
             if i + 1 < tracks.len() {
                 menu_item(ui, actions, "Move down", Action::Move(i, i + 1));
             }
-            if self.playing != Some(t.id) {
+            if self.playing.is_none_or(|(id, _)| id != t.id) {
                 menu_item(ui, actions, "Remove from queue", Action::Remove(i));
             }
         } else {

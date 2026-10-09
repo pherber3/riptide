@@ -46,6 +46,15 @@ pub fn tier_color(quality: Quality) -> Color32 {
     }
 }
 
+/// The colour that marks the track playing, as Tidal does: its tier's, gold at Max and teal at
+/// High. Low's grey wouldn't stand out from the other rows, so it takes the theme's accent.
+pub fn playing_color(quality: Quality) -> Color32 {
+    match quality {
+        Quality::Low => p().accent,
+        tier => tier_color(tier),
+    }
+}
+
 pub fn clock(seconds: f64) -> String {
     let s = seconds as u64;
     match s / 3600 {

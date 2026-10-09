@@ -8,7 +8,9 @@ use crate::dialogs::{self, Target};
 use crate::queue::Repeat;
 use crate::theme::{Icon, bold, p, semibold};
 use crate::tidal::{self, Card, Item, Lyrics, Quality};
-use crate::widgets::{bar, clickable, clock, icon_button, link_text, nav_item, picture, pill, play_disc, search_field, section, tier_badge, tier_row};
+use crate::widgets::{
+    bar, clickable, clock, icon_button, link_text, nav_item, picture, pill, play_disc, playing_color, search_field, section, tier_badge, tier_row,
+};
 
 /// A playlist being dragged in the sidebar: id and title.
 struct Dragged(String, String);
@@ -163,6 +165,12 @@ impl App {
         });
     }
 
+    /// The track playing, and the colour of the tier it plays in, to mark it in track lists.
+    fn playing(&self) -> Option<(u64, Color32)> {
+        let tier = self.player.status.format.lock().unwrap().0;
+        self.queue.current().map(|t| (t.id, playing_color(tier)))
+    }
+
     /// The playing track's cover, title, artist and where it is playing from, each a link.
     fn playing_now(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let Some(t) = self.queue.current() else { return };
@@ -296,7 +304,7 @@ impl App {
         if !self.queue_open {
             return;
         }
-        let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list: List::Queue };
+        let rows = Rows { playing: self.playing(), library: &self.library, list: List::Queue };
         let frame = egui::Frame::new().fill(p().panel).inner_margin(egui::Margin::symmetric(20, 0));
         egui::Panel::right("side").default_size(420.0).resizable(true).frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -418,9 +426,10 @@ impl App {
             if let Some(y) = self.scroll_to.take() {
                 area = area.vertical_scroll_offset(y);
             }
+            let playing = self.playing();
             let Some(page) = &mut self.page else { return };
             let list = editing.as_deref().map_or(List::Tracks, List::Playlist);
-            let rows = Rows { playing: self.queue.current().map(|t| t.id), library: &self.library, list };
+            let rows = Rows { playing, library: &self.library, list };
             let scrolled = area.show(ui, |ui| padded(ui, |ui| super::views::page(ui, page, &rows, actions)));
             page.scroll = scrolled.state.offset.y;
             if let Some(color) = tint {
