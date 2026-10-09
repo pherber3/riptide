@@ -96,8 +96,9 @@ pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
             };
             modal(ctx, 680.0, heading, |ui| {
                 let height = ui.ctx().content_rect().height() * 0.6;
-                let area = egui::ScrollArea::vertical().max_height(height).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
-                area.show(ui, |ui| {
+                // Unlike the app's quiet scrollbars, this one shows at rest: it's what says there's more.
+                ui.spacing_mut().scroll.dormant_handle_opacity = 0.5;
+                egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
                     ui.set_width(ui.available_width() - 16.0);
                     for paragraph in &prose.paragraphs {
                         ui.horizontal_wrapped(|ui| {
