@@ -14,6 +14,8 @@ pub enum Dialog {
     },
     /// A track's credits: its title, then each role and its names.
     Credits(String, Vec<(String, String)>),
+    /// A page's paragraph in full (see `Head::about`), under its title.
+    About(String, String),
     Form(PlaylistForm),
 }
 
@@ -67,6 +69,12 @@ pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
                     ui.add_space(10.0);
                 }
             });
+            (false, false)
+        }),
+        Dialog::About(title, text) => modal(ctx, 560.0, title, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(520.0)
+                .show(ui, |ui| ui.label(RichText::new(text.as_str()).size(15.0).line_height(Some(24.0)).color(p().text)));
             (false, false)
         }),
         Dialog::Form(form) => {

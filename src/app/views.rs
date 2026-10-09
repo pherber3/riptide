@@ -99,7 +99,7 @@ enum Start {
 /// A page's header, as in Tidal: the artwork with the title, a line about it and the length beside
 /// it, and the buttons in a row underneath.
 fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, library: &Library, actions: &mut Vec<Action>) -> Option<Start> {
-    let (mut start, mut go) = (None, None);
+    let (mut start, mut go, mut read) = (None, None, false);
     let mut buttons = |ui: &mut Ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -171,12 +171,11 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 let title = line(RichText::new(&head.title).font(bold(40.0)).color(p().text));
                 let subtitle = (!byline.is_empty()).then(|| line(RichText::new(&byline).size(15.0).color(p().secondary)));
                 let length = length.map(|length| line(RichText::new(length).font(semibold(12.0)).color(p().secondary)));
-                // The paragraph about it, a few lines of it until "Read more" opens the rest.
-                let open_id = ui.id().with(("read more", &head.title));
-                let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+                // The start of the paragraph about it; "Read more" opens all of it.
                 let about = (!head.about.is_empty()).then(|| {
                     let mut job = egui::text::LayoutJob::simple(head.about.clone(), egui::FontId::proportional(14.0), p().secondary, width.min(640.0));
-                    job.wrap.max_rows = if open { usize::MAX } else { 3 };
+                    job.wrap.max_rows = 3;
+                    job.sections[0].format.line_height = Some(20.0);
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
                 });
                 let read_more = RichText::new("Read more").font(semibold(13.0)).color(p().text);
@@ -224,9 +223,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                     if let Some(about) = about {
                         ui.label(about);
                     }
-                    if more.is_some() && link_text(ui, read_more).clicked() {
-                        ui.data_mut(|d| d.insert_temp(open_id, true));
-                    }
+                    read = more.is_some() && link_text(ui, read_more).clicked();
                 });
             });
             ui.add_space(24.0);
@@ -242,6 +239,9 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
     }
     ui.add_space(16.0);
     actions.extend(go.map(Action::Open));
+    if read {
+        actions.push(Action::Dialog(Box::new(dialogs::Dialog::About(head.title.clone(), head.about.clone()))));
+    }
     start
 }
 
