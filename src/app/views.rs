@@ -171,8 +171,19 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 let title = line(RichText::new(&head.title).font(bold(40.0)).color(p().text));
                 let subtitle = (!byline.is_empty()).then(|| line(RichText::new(&byline).size(15.0).color(p().secondary)));
                 let length = length.map(|length| line(RichText::new(length).font(semibold(12.0)).color(p().secondary)));
+                // The paragraph about it, a few lines of it until "Read more" opens the rest.
+                let open_id = ui.id().with(("read more", &head.title));
+                let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+                let about = (!head.about.is_empty()).then(|| {
+                    let mut job = egui::text::LayoutJob::simple(head.about.clone(), egui::FontId::proportional(14.0), p().secondary, width.min(640.0));
+                    job.wrap.max_rows = if open { usize::MAX } else { 3 };
+                    ui.ctx().fonts_mut(|f| f.layout_job(job))
+                });
+                let read_more = RichText::new("Read more").font(semibold(13.0)).color(p().text);
+                let more = about.as_ref().filter(|a| a.elided).map(|_| line(read_more.clone()));
                 let gap = 8.0;
-                let height = [Some(&title), subtitle.as_ref(), length.as_ref()].into_iter().flatten().map(|l| l.size().y + gap).sum::<f32>() - gap;
+                let lines = [Some(&title), subtitle.as_ref(), length.as_ref(), about.as_ref(), more.as_ref()];
+                let height = lines.into_iter().flatten().map(|l| l.size().y + gap).sum::<f32>() - gap;
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = gap;
                     ui.add_space(((side - height) / 2.0).max(0.0));
@@ -196,18 +207,26 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                         (_, None) => {}
                     }
                     // The edition's tier follows the length, in the badge the player shows it with.
-                    ui.horizontal(|ui| {
-                        if let Some(length) = length {
-                            ui.label(length);
-                        }
-                        if let Some(Editions { this, explicit_varies, .. }) = &head.editions {
-                            ui.add(tier_badge(this.quality).sense(Sense::hover()));
-                            if *explicit_varies {
-                                let explicit = if this.explicit { "EXPLICIT" } else { "CLEAN" };
-                                ui.label(RichText::new(explicit).font(semibold(12.0)).color(p().secondary));
+                    if length.is_some() || head.editions.is_some() {
+                        ui.horizontal(|ui| {
+                            if let Some(length) = length {
+                                ui.label(length);
                             }
-                        }
-                    });
+                            if let Some(Editions { this, explicit_varies, .. }) = &head.editions {
+                                ui.add(tier_badge(this.quality).sense(Sense::hover()));
+                                if *explicit_varies {
+                                    let explicit = if this.explicit { "EXPLICIT" } else { "CLEAN" };
+                                    ui.label(RichText::new(explicit).font(semibold(12.0)).color(p().secondary));
+                                }
+                            }
+                        });
+                    }
+                    if let Some(about) = about {
+                        ui.label(about);
+                    }
+                    if more.is_some() && link_text(ui, read_more).clicked() {
+                        ui.data_mut(|d| d.insert_temp(open_id, true));
+                    }
                 });
             });
             ui.add_space(24.0);
@@ -314,9 +333,6 @@ pub fn page(ui: &mut Ui, page: &mut Page, rows: &Rows, actions: &mut Vec<Action>
                         }
                     });
                 }
-                if !shelf.text.is_empty() {
-                    about(ui, &shelf.text);
-                }
                 if !shelf.cards.is_empty() {
                     egui::ScrollArea::horizontal().id_salt(("shelf", n)).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -357,21 +373,6 @@ fn shelf_title(ui: &mut Ui, title: &str, more: Option<&str>, actions: &mut Vec<A
             actions.push(Action::Open(Source::Page(more.into())));
         }
     });
-}
-
-/// A long paragraph (an artist's bio): the start, and the rest behind "Read more".
-fn about(ui: &mut Ui, text: &str) {
-    let id = ui.id().with("read more");
-    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-    let cut = text.char_indices().nth(600).map(|(at, _)| at).filter(|_| !open);
-    ui.scope(|ui| {
-        ui.set_max_width(820.0);
-        let shown = cut.map_or(text.to_string(), |at| format!("{}…", text[..at].trim_end()));
-        ui.label(RichText::new(shown).size(15.0).color(p().secondary));
-    });
-    if cut.is_some() && link_text(ui, RichText::new("Read more").font(semibold(13.0)).color(p().text)).clicked() {
-        ui.data_mut(|d| d.insert_temp(id, true));
-    }
 }
 
 /// A fixed-width cell of a track row, its content centred vertically.

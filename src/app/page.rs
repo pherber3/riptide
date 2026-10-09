@@ -90,6 +90,8 @@ pub struct Head {
     /// An album's edition and the others it comes in.
     pub editions: Option<Editions>,
     pub subtitle: String,
+    /// A paragraph about it: an artist's bio, a playlist's description.
+    pub about: String,
     pub art: Option<(Option<String>, bool)>,
     pub radio: Option<Source>,
 }
@@ -233,15 +235,18 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             (Some(Head { item: Some(Item::Album(album.id)), title: album.title, by, editions, subtitle, art, ..Default::default() }), tracks(list, false))
         }
         Source::Artist(id) => {
-            let (artist, shelves) = tidal.artist(*id).await?;
+            let (artist, about, shelves) = tidal.artist(*id).await?;
             let art = Some((tidal::image(artist.picture.as_deref(), 480), true));
-            let head = Head { item: Some(Item::Artist(*id)), title: artist.name, art, radio: Some(Source::ArtistRadio(*id)), ..Default::default() };
+            let head = Head { item: Some(Item::Artist(*id)), title: artist.name, about, art, radio: Some(Source::ArtistRadio(*id)), ..Default::default() };
             (Some(head), Body::Shelves(shelves))
         }
         Source::Playlist(id) => {
             let (playlist, list) = tidal.playlist(id).await?;
             let art = Some((tidal::image(playlist.cover.as_deref(), 640), false));
-            (Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, art, ..Default::default() }), tracks(list, true))
+            (
+                Some(Head { item: Some(Item::Playlist(id.clone())), title: playlist.title, about: playlist.description, art, ..Default::default() }),
+                tracks(list, true),
+            )
         }
         Source::Mix(mix) => {
             let head = Head { title: mix.title.clone(), subtitle: mix.subtitle.clone(), art: Some((mix.image.clone(), false)), ..Default::default() };

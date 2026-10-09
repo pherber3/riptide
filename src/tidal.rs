@@ -194,6 +194,7 @@ pub struct Playlist {
     pub title: String,
     pub cover: Option<String>,
     pub count: u64,
+    pub description: String,
 }
 
 /// Lyrics: timed lines when Tidal has them synced, else just the text; both empty when there are none.
@@ -269,8 +270,6 @@ pub struct Shelf {
     pub links: Vec<(String, String)>,
     /// The page with all of it ("View all").
     pub more: Option<String>,
-    /// A paragraph, such as an artist's bio.
-    pub text: String,
 }
 
 impl Shelf {
@@ -291,7 +290,7 @@ impl Shelf {
     }
 
     fn is_empty(&self) -> bool {
-        self.cards.is_empty() && self.tracks.is_empty() && self.links.is_empty() && self.text.is_empty()
+        self.cards.is_empty() && self.tracks.is_empty() && self.links.is_empty()
     }
 
     /// The shelf as it shows, with one card per release, if it has anything to show.
@@ -533,8 +532,8 @@ impl Tidal {
         Ok((album, editions, tracks))
     }
 
-    /// An artist and their page: top tracks, releases by kind, similar artists and bio.
-    pub async fn artist(&self, id: u64) -> Result<(Artist, Vec<Shelf>)> {
+    /// An artist, their bio, and their page: top tracks, releases by kind and similar artists.
+    pub async fn artist(&self, id: u64) -> Result<(Artist, String, Vec<Shelf>)> {
         let url = format!("{V1}/artists/{id}");
         let (top_url, albums_url, similar_url, bio_url) = (format!("{url}/toptracks"), format!("{url}/albums"), format!("{url}/similar"), format!("{url}/bio"));
         let releases = |filter| self.items(&albums_url, filter, 200, |v| album(v).map(Card::Album));
@@ -553,9 +552,9 @@ impl Tidal {
             Shelf::cards("EPs & Singles", singles.unwrap_or_default()),
             Shelf::cards("Compilations", compilations.unwrap_or_default()),
             Shelf::cards("Fans also like", similar.map(|v| list(&v["items"], |v| artist(v).map(Card::Artist))).unwrap_or_default()),
-            Shelf { text: bio.map(|v| plain(&text(&v["text"]))).unwrap_or_default(), ..Shelf::named("About") },
         ];
-        Ok((artist(&info?).context("bad artist")?, shelves.into_iter().filter(|s| !s.is_empty()).collect()))
+        let bio = bio.map(|v| plain(&text(&v["text"]))).unwrap_or_default();
+        Ok((artist(&info?).context("bad artist")?, bio, shelves.into_iter().filter(|s| !s.is_empty()).collect()))
     }
 
     pub async fn playlist(&self, id: &str) -> Result<(Playlist, Vec<Track>)> {
@@ -844,7 +843,7 @@ fn list<T>(v: &Value, parse: impl Fn(&Value) -> Option<T>) -> Vec<T> {
     each(v).filter_map(parse).collect()
 }
 
-/// Tidal's text without its link markup (`[wimpLink artistId="1"]Name[/wimpLink]`).
+/// Tidal's text without its link markup (`[wimpLink artistId="1"]Name[/wimpLink]`) or the spaces around it.
 fn plain(marked: &str) -> String {
     let mut out = String::with_capacity(marked.len());
     let mut rest = marked;
@@ -853,7 +852,7 @@ fn plain(marked: &str) -> String {
         rest = rest[start..].split_once(']').map_or("", |(_, after)| after);
     }
     out.push_str(rest);
-    out.replace("<br/>", "\n")
+    out.replace("<br/>", "\n").trim().into()
 }
 
 fn text(v: &Value) -> String {
@@ -931,5 +930,6 @@ fn playlist(v: &Value) -> Option<Playlist> {
         title: text(&v["title"]),
         cover: image_id(&v["squareImage"]).or_else(|| image_id(&v["image"])),
         count: v["numberOfTracks"].as_u64().unwrap_or(0),
+        description: plain(&text(&v["description"])),
     })
 }
