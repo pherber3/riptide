@@ -403,8 +403,7 @@ pub enum List<'a> {
 
 impl Rows<'_> {
     /// A table of tracks under column headers, clickable to sort when `sorted` is set (sort, reversed).
-    /// Click a title or a hovered number, or double-click a row, to play the list from there;
-    /// right-click a row for more. Lists that span albums show each track's cover.
+    /// Click a row to play the list from there; right-click it for more. Lists that span albums show each track's cover.
     pub fn show(&self, ui: &mut Ui, tracks: &[Track], order: Option<&[usize]>, album: bool, sorted: Option<(Sort, bool)>, actions: &mut Vec<Action>) {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -452,7 +451,7 @@ impl Rows<'_> {
                     List::Queue => Action::Jump(i),
                     _ => Action::PlayTracks(in_order(tracks, order), pos, false),
                 };
-                let row = ui.interact(rect, ui.id().with(("row", pos)), if reorder.is_some() { Sense::click_and_drag() } else { Sense::click() });
+                let row = clickable(ui.interact(rect, ui.id().with(("row", pos)), if reorder.is_some() { Sense::click_and_drag() } else { Sense::click() }));
                 if let Some(playlist) = reorder {
                     self.drag_row(ui, row.clone(), rect, playlist, pos, actions);
                 }
@@ -464,9 +463,7 @@ impl Rows<'_> {
                 ui.horizontal(|ui| {
                     cell(ui, NUMBER, height, |ui| {
                         if hovered {
-                            if icon_button(ui, Icon::Play, 14.0, p().text).clicked() {
-                                actions.push(play());
-                            }
+                            ui.add(Icon::Play.image(p().text, 14.0));
                         } else if playing {
                             ui.add(Icon::Playing.image(p().accent, 16.0));
                         } else {
@@ -481,9 +478,7 @@ impl Rows<'_> {
                                     ui.add_space(4.0);
                                 }
                                 let title = RichText::new(&t.title).font(medium(14.0)).color(if playing { p().accent } else { p().text });
-                                if ui.add(egui::Label::new(title).truncate().selectable(false).sense(Sense::click())).clicked() {
-                                    actions.push(play());
-                                }
+                                ui.add(egui::Label::new(title).truncate().selectable(false));
                             }
                             Sort::Artist => link_to(ui, &t.artist, t.artist_id.map(Source::Artist), actions),
                             Sort::Album => link_to(ui, &t.album, t.album_id.map(Source::Album), actions),
@@ -495,7 +490,7 @@ impl Rows<'_> {
                     cell(ui, TIME, height, |ui| ui.label(RichText::new(clock(f64::from(t.duration))).color(p().secondary)));
                     heart(ui, t.id, self.library, hovered, actions);
                 });
-                if row.double_clicked() {
+                if row.clicked() {
                     actions.push(play());
                 }
                 egui::Popup::context_menu(&row).close_behavior(KEEP_OPEN).show(|ui| self.menu(ui, tracks, i, actions));
