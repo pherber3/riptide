@@ -173,7 +173,7 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
                 let length = length.map(|length| line(RichText::new(length).font(semibold(12.0)).color(p().secondary)));
                 // The start of the paragraph about it; "Read more" opens all of it.
                 let about = (!head.about.is_empty()).then(|| {
-                    let mut job = egui::text::LayoutJob::simple(head.about.clone(), egui::FontId::proportional(14.0), p().secondary, width.min(640.0));
+                    let mut job = egui::text::LayoutJob::simple(head.about.text(), egui::FontId::proportional(14.0), p().secondary, width.min(640.0));
                     job.wrap.max_rows = 3;
                     job.sections[0].format.line_height = Some(20.0);
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
@@ -240,7 +240,9 @@ fn header(ui: &mut Ui, head: &Head, can_play: bool, length: Option<String>, libr
     ui.add_space(16.0);
     actions.extend(go.map(Action::Open));
     if read {
-        actions.push(Action::Dialog(Box::new(dialogs::Dialog::About(head.title.clone(), head.about.clone()))));
+        let kind = if matches!(head.item, Some(Item::Artist(_))) { "Biography" } else { "About" };
+        let about = dialogs::Dialog::About { title: head.title.clone(), kind, art: head.art.clone(), prose: head.about.clone(), open: None };
+        actions.push(Action::Dialog(Box::new(about)));
     }
     start
 }

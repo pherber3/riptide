@@ -194,7 +194,51 @@ pub struct Playlist {
     pub title: String,
     pub cover: Option<String>,
     pub count: u64,
-    pub description: String,
+    pub description: Prose,
+}
+
+/// A paragraph or more about an artist or playlist: runs of text, some linking to an artist or album.
+#[derive(Clone, Debug, Default)]
+pub struct Prose {
+    pub paragraphs: Vec<Vec<(String, Option<Item>)>>,
+    /// Who wrote it, such as "TiVo" for an artist's bio.
+    pub source: String,
+}
+
+impl Prose {
+    /// From Tidal's markup: `<br/>` between paragraphs, `[wimpLink artistId="1"]Name[/wimpLink]`
+    /// around links.
+    fn parse(marked: &str, source: String) -> Self {
+        let paragraph = |mut rest: &str| {
+            let mut runs = Vec::new();
+            while let Some(start) = rest.find("[wimpLink") {
+                runs.push((rest[..start].to_string(), None));
+                let (tag, after) = rest[start..].split_once(']').unwrap_or((rest, ""));
+                let (name, after) = after.split_once("[/wimpLink]").unwrap_or((after, ""));
+                runs.push((name.to_string(), link(tag)));
+                rest = after;
+            }
+            runs.push((rest.to_string(), None));
+            runs.retain(|(text, _)| !text.is_empty());
+            runs
+        };
+        Self { paragraphs: marked.split("<br/>").map(str::trim).filter(|p| !p.is_empty()).map(paragraph).collect(), source }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paragraphs.is_empty()
+    }
+
+    /// All of it as plain text, a paragraph to a line.
+    pub fn text(&self) -> String {
+        self.paragraphs.iter().map(|p| p.iter().map(|(text, _)| text.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// What a link tag (`[wimpLink artistId="1"`) leads to: an artist or an album.
+fn link(tag: &str) -> Option<Item> {
+    let id = |key: &str| tag.split_once(&format!("{key}=\""))?.1.split('"').next()?.parse().ok();
+    id("artistId").map(Item::Artist).or_else(|| id("albumId").map(Item::Album))
 }
 
 /// Lyrics: timed lines when Tidal has them synced, else just the text; both empty when there are none.
@@ -533,7 +577,7 @@ impl Tidal {
     }
 
     /// An artist, their bio, and their page: top tracks, releases by kind and similar artists.
-    pub async fn artist(&self, id: u64) -> Result<(Artist, String, Vec<Shelf>)> {
+    pub async fn artist(&self, id: u64) -> Result<(Artist, Prose, Vec<Shelf>)> {
         let url = format!("{V1}/artists/{id}");
         let (top_url, albums_url, similar_url, bio_url) = (format!("{url}/toptracks"), format!("{url}/albums"), format!("{url}/similar"), format!("{url}/bio"));
         let releases = |filter| self.items(&albums_url, filter, 200, |v| album(v).map(Card::Album));
@@ -553,7 +597,7 @@ impl Tidal {
             Shelf::cards("Compilations", compilations.unwrap_or_default()),
             Shelf::cards("Fans also like", similar.map(|v| list(&v["items"], |v| artist(v).map(Card::Artist))).unwrap_or_default()),
         ];
-        let bio = bio.map(|v| plain(&text(&v["text"]))).unwrap_or_default();
+        let bio = bio.map(|v| Prose::parse(&text(&v["text"]), text(&v["source"]))).unwrap_or_default();
         Ok((artist(&info?).context("bad artist")?, bio, shelves.into_iter().filter(|s| !s.is_empty()).collect()))
     }
 
@@ -843,18 +887,6 @@ fn list<T>(v: &Value, parse: impl Fn(&Value) -> Option<T>) -> Vec<T> {
     each(v).filter_map(parse).collect()
 }
 
-/// Tidal's text without its link markup (`[wimpLink artistId="1"]Name[/wimpLink]`) or the spaces around it.
-fn plain(marked: &str) -> String {
-    let mut out = String::with_capacity(marked.len());
-    let mut rest = marked;
-    while let Some(start) = [rest.find("[wimpLink"), rest.find("[/wimpLink]")].into_iter().flatten().min() {
-        out.push_str(&rest[..start]);
-        rest = rest[start..].split_once(']').map_or("", |(_, after)| after);
-    }
-    out.push_str(rest);
-    out.replace("<br/>", "\n").trim().into()
-}
-
 fn text(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
 }
@@ -930,6 +962,6 @@ fn playlist(v: &Value) -> Option<Playlist> {
         title: text(&v["title"]),
         cover: image_id(&v["squareImage"]).or_else(|| image_id(&v["image"])),
         count: v["numberOfTracks"].as_u64().unwrap_or(0),
-        description: plain(&text(&v["description"])),
+        description: Prose::parse(&text(&v["description"]), String::new()),
     })
 }

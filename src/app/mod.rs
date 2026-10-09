@@ -584,6 +584,7 @@ impl eframe::App for App {
             match (self.dialog.take(), accepted) {
                 (Some(Dialog::Confirm { then, .. }), true) => actions.push(then),
                 (Some(Dialog::Form(form)), true) => self.save_form(form),
+                (Some(Dialog::About { open: Some(to), .. }), true) => actions.push(Action::Open(to)),
                 _ => {}
             }
         }

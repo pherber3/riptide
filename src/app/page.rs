@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::tidal::{self, Card, Edition, Item, Mix, ROOT, Shelf, Tidal, Track};
+use crate::tidal::{self, Card, Edition, Item, Mix, Prose, ROOT, Shelf, Tidal, Track};
 use crate::view::{Sort, View};
 
 const ALBUM_SORTS: &[Sort] = &[Sort::Added, Sort::Title, Sort::Artist, Sort::Year];
@@ -90,8 +90,8 @@ pub struct Head {
     /// An album's edition and the others it comes in.
     pub editions: Option<Editions>,
     pub subtitle: String,
-    /// A paragraph about it: an artist's bio, a playlist's description.
-    pub about: String,
+    /// What's written about it: an artist's bio, a playlist's description.
+    pub about: Prose,
     pub art: Option<(Option<String>, bool)>,
     pub radio: Option<Source>,
 }

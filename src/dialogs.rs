@@ -1,8 +1,9 @@
-use egui::{Color32, Context, RichText, Ui, vec2};
+use egui::{Color32, Context, RichText, Sense, Ui, vec2};
 
-use crate::app::Action;
+use crate::app::{Action, Source};
 use crate::theme::{Icon, bold, medium, p, semibold};
-use crate::widgets::{icon_button, setting, switch};
+use crate::tidal::{Item, Prose};
+use crate::widgets::{clickable, icon_button, picture, setting, switch};
 
 /// The one dialog that can be open at a time.
 pub enum Dialog {
@@ -14,8 +15,16 @@ pub enum Dialog {
     },
     /// A track's credits: its title, then each role and its names.
     Credits(String, Vec<(String, String)>),
-    /// A page's paragraph in full (see `Head::about`), under its title.
-    About(String, String),
+    /// All that's written about a page (see `Head::about`), under its title and artwork, and the
+    /// page one of its links opens, once clicked.
+    About {
+        title: String,
+        /// What it is, such as "Biography".
+        kind: &'static str,
+        art: Option<(Option<String>, bool)>,
+        prose: Prose,
+        open: Option<Source>,
+    },
     Form(PlaylistForm),
 }
 
@@ -49,7 +58,7 @@ pub fn confirm(title: String, text: &'static str, then: Action) -> Action {
 /// (confirmed or saved) rather than dismissed.
 pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
     let (accepted, dismissed) = match dialog {
-        Dialog::Confirm { title, text, .. } => modal(ctx, 400.0, title, |ui| {
+        Dialog::Confirm { title, text, .. } => modal(ctx, 400.0, heading(title), |ui| {
             ui.label(RichText::new(*text).size(14.0).color(p().secondary));
             ui.add_space(20.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -58,7 +67,7 @@ pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
             })
             .inner
         }),
-        Dialog::Credits(title, credits) => modal(ctx, 440.0, &format!("Credits · {title}"), |ui| {
+        Dialog::Credits(title, credits) => modal(ctx, 440.0, heading(&format!("Credits · {title}")), |ui| {
             egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
                 if credits.is_empty() {
                     ui.label(RichText::new("Tidal has no credits for this track.").color(p().secondary));
@@ -71,12 +80,58 @@ pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
             });
             (false, false)
         }),
-        Dialog::About(title, text) => modal(ctx, 560.0, title, |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(520.0)
-                .show(ui, |ui| ui.label(RichText::new(text.as_str()).size(15.0).line_height(Some(24.0)).color(p().text)));
-            (false, false)
-        }),
+        Dialog::About { title, kind, art, prose, open } => {
+            let heading = |ui: &mut Ui| {
+                ui.horizontal(|ui| {
+                    if let Some((image, round)) = art {
+                        picture(ui, image.clone(), 72.0, *round);
+                        ui.add_space(12.0);
+                    }
+                    ui.vertical(|ui| {
+                        ui.add_space(14.0);
+                        ui.add(egui::Label::new(RichText::new(title.as_str()).font(bold(18.0)).color(p().text)).truncate());
+                        ui.label(RichText::new(*kind).size(14.0).color(p().secondary));
+                    });
+                });
+            };
+            modal(ctx, 680.0, heading, |ui| {
+                let height = ui.ctx().content_rect().height() * 0.6;
+                let area = egui::ScrollArea::vertical().max_height(height).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+                area.show(ui, |ui| {
+                    ui.set_width(ui.available_width() - 16.0);
+                    for paragraph in &prose.paragraphs {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                            for (text, link) in paragraph {
+                                let run = RichText::new(text.as_str()).size(15.0).line_height(Some(24.0)).color(p().text);
+                                let to = match link {
+                                    Some(Item::Artist(id)) => Some(Source::Artist(*id)),
+                                    Some(Item::Album(id)) => Some(Source::Album(*id)),
+                                    _ => None,
+                                };
+                                match to {
+                                    Some(to) => {
+                                        let link = egui::Label::new(run.underline()).selectable(false).sense(Sense::click());
+                                        if clickable(ui.add(link)).clicked() {
+                                            *open = Some(to);
+                                        }
+                                    }
+                                    None => {
+                                        ui.label(run);
+                                    }
+                                }
+                            }
+                        });
+                        ui.add_space(14.0);
+                    }
+                });
+                if !prose.source.is_empty() {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(format!("Artist bio from {}", prose.source)).size(13.0).color(p().dim));
+                }
+                (open.is_some(), false)
+            })
+        }
         Dialog::Form(form) => {
             let heading = match form.target {
                 Target::Create(_) => "Create playlist",
@@ -84,7 +139,7 @@ pub fn show(ctx: &Context, dialog: &mut Dialog) -> Option<bool> {
                 Target::CreateFolder => "Create folder",
                 Target::RenameFolder(_) => "Rename folder",
             };
-            modal(ctx, 460.0, heading, |ui| (playlist_form(ui, form), false))
+            modal(ctx, 460.0, self::heading(heading), |ui| (playlist_form(ui, form), false))
         }
     };
     (accepted || dismissed).then_some(accepted)
@@ -114,17 +169,20 @@ fn playlist_form(ui: &mut Ui, form: &mut PlaylistForm) -> bool {
     ready && (save.inner || enter)
 }
 
+/// A dialog's usual heading: its title.
+fn heading(title: &str) -> impl FnOnce(&mut Ui) + '_ {
+    move |ui| {
+        ui.add(egui::Label::new(RichText::new(title).font(bold(20.0)).color(p().text)).truncate());
+    }
+}
+
 /// A dialog: a heading with a close button over `body`, which says whether it was accepted.
 /// Returns that, and whether the dialog was dismissed (the close button, Esc, or a click outside).
-fn modal(ctx: &Context, width: f32, heading: &str, body: impl FnOnce(&mut Ui) -> (bool, bool)) -> (bool, bool) {
+fn modal(ctx: &Context, width: f32, heading: impl FnOnce(&mut Ui), body: impl FnOnce(&mut Ui) -> (bool, bool)) -> (bool, bool) {
     let frame = egui::Frame::new().fill(p().surface).corner_radius(14).inner_margin(24);
     let modal = egui::Modal::new(egui::Id::new("dialog")).frame(frame).show(ctx, |ui| {
         ui.set_width(width);
-        let (_, close) = egui::Sides::new().shrink_left().show(
-            ui,
-            |ui| ui.add(egui::Label::new(RichText::new(heading).font(bold(20.0)).color(p().text)).truncate()),
-            |ui| icon_button(ui, Icon::Close, 18.0, p().secondary).clicked(),
-        );
+        let (_, close) = egui::Sides::new().shrink_left().show(ui, heading, |ui| icon_button(ui, Icon::Close, 18.0, p().secondary).clicked());
         ui.add_space(14.0);
         let (accepted, cancelled) = body(ui);
         (accepted, cancelled || close)
