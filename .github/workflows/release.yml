@@ -81,6 +81,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      # The release's notes are the tag's message (`git tag -a`). Checkout keeps tags without their
+      # messages, so the tag is fetched again whole.
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -88,4 +94,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: ${{ runner.temp }}/notes.md
           generate_release_notes: true

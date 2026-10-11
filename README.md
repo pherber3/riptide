@@ -19,7 +19,8 @@ Riptide is unofficial and not affiliated with TIDAL. You need a paid TIDAL subsc
 - **Your library**: tracks, albums, artists, playlists and playlist folders. Create, rename,
   reorder, move into folders and delete playlists; add tracks to playlists.
 - **Browsing**: Home, Explore and genres, artist pages with discography and bio, mixes, track and
-  artist radio, and search that updates as you type.
+  artist radio, and search that updates as you type. Each album shows once, in its best version,
+  with its others (explicit or clean, Max or High) a click away.
 - **Sound**: Max (up to 24-bit/192 kHz FLAC), High (16-bit/44.1 kHz FLAC) or Low (AAC). Optional
   volume normalization, and a choice of output device.
 - **Lyrics**: synced lyrics in a full-window view beside the cover. Click a line to jump to it.
