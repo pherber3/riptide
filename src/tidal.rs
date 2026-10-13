@@ -666,7 +666,16 @@ impl Tidal {
         self.items(&format!("{V1}/mixes/{id}/items"), &[], 1000, track).await
     }
 
-    /// Tracks like this one, for radio.
+    pub async fn track(&self, id: u64) -> Result<Track> {
+        track(&self.get(&format!("{V1}/tracks/{id}"), &[]).await?).context("bad track")
+    }
+
+    /// An artist's name and picture, without the rest of their page.
+    pub async fn artist_info(&self, id: u64) -> Result<Artist> {
+        artist(&self.get(&format!("{V1}/artists/{id}"), &[]).await?).context("bad artist")
+    }
+
+    /// Tracks like this one, for radio, starting with it.
     pub async fn track_radio(&self, id: u64) -> Result<Vec<Track>> {
         self.radio("tracks", id).await
     }

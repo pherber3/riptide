@@ -274,8 +274,17 @@ pub async fn load(tidal: Tidal, source: Source) -> Result<Page> {
             };
             (Head::title(title), body)
         }
-        Source::TrackRadio(id) => (Head::title("Radio"), tracks(tidal.track_radio(*id).await?, true)),
-        Source::ArtistRadio(id) => (Head::title("Radio"), tracks(tidal.artist_radio(*id).await?, true)),
+        // A radio is named after what it starts from, as in Tidal: the track and its cover, or the artist.
+        Source::TrackRadio(id) => {
+            let (track, list) = tokio::try_join!(tidal.track(*id), tidal.track_radio(*id))?;
+            let art = Some((tidal::image(track.cover.as_deref(), 640), false));
+            (Some(Head { title: track.title, subtitle: format!("Track radio · {}", track.artist), art, ..Default::default() }), tracks(list, true))
+        }
+        Source::ArtistRadio(id) => {
+            let (artist, list) = tokio::try_join!(tidal.artist_info(*id), tidal.artist_radio(*id))?;
+            let art = Some((tidal::image(artist.picture.as_deref(), 480), true));
+            (Some(Head { title: artist.name, subtitle: "Artist radio".into(), art, ..Default::default() }), tracks(list, true))
+        }
     };
     Ok(Page { source, head, body, view: None, scroll: 0.0 })
 }

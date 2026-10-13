@@ -557,7 +557,7 @@ impl Rows<'_> {
         let saved = self.library.saved.contains(&Item::Track(t.id));
         let collection = if saved { "Remove from My Collection" } else { "Add to My Collection" };
         menu_item(ui, actions, collection, Action::Save(Item::Track(t.id), !saved));
-        menu_item(ui, actions, "Go to track radio", Action::Play(Source::TrackRadio(t.id)));
+        menu_item(ui, actions, "Go to track radio", Action::Open(Source::TrackRadio(t.id)));
         menu_item(ui, actions, "Credits", Action::Credits(t.id, t.title.clone()));
         menu_item(ui, actions, "Copy link", Action::CopyLink(Item::Track(t.id).link()));
         if let Some(id) = t.album_id {
